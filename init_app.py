@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-import main as routes_module
+import routes as routes_module
 
 
 def create_app() -> FastAPI:

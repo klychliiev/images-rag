@@ -16,7 +16,7 @@ def _get_service() -> any:
     token_path = Path("token.json")
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(
-            str(token_path), settings.google_cloud_scopes
+            str(token_path), [settings.google_cloud_scopes]
         )
 
     if not creds or not creds.valid:
@@ -24,7 +24,7 @@ def _get_service() -> any:
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json", settings.google_cloud_scopes
+                "credentials.json", [settings.google_cloud_scopes]
             )
             creds = flow.run_local_server(port=0)
         token_path.write_text(creds.to_json(), encoding="utf-8")

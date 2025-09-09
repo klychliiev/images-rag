@@ -6,11 +6,11 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from loguru import logger
 from pinecone import Pinecone
 
 from config import settings
 from drive_uploader import upload_images_to_folder
-from logger import logger
 from pinecone_service import PineconeDocumentIndexer
 from processor import ODTProcessor
 from schemas import ProcessingResponse

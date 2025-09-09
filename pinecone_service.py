@@ -5,9 +5,8 @@ from typing import Any
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai.embeddings import OpenAIEmbeddings
+from loguru import logger
 from pinecone import Pinecone, ServerlessSpec
-
-from logger import logger
 
 
 class PineconeDocumentIndexer:

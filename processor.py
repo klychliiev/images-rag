@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-from logger import logger
+from loguru import logger
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".svg", ".webp"}
 
