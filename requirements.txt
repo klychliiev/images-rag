@@ -1,0 +1,15 @@
+google-api-python-client==2.141.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+fastapi==0.116.1
+langchain==0.3.27
+langchain-openai==0.3.32
+openai==1.106.1
+pinecone==7.3.0
+pydantic==2.11.7
+pypandoc==1.15
+python-multipart==0.0.20
+tiktoken==0.11.0
+uvicorn==0.35.0
+pydantic-settings==2.10.1
+loguru

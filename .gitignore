@@ -1,0 +1,40 @@
+# Logs and temporary files
+*.log
+*.tmp
+logs/
+
+# Dependency directories
+node_modules/
+vendor/
+
+# Build output
+dist/
+build/
+target/
+
+# Environment variables
+.env
+.env.local
+
+# IDE and editor files
+.idea/
+.vscode/
+*.iml
+.DS_Store # macOS specific
+Thumbs.db # Windows specific
+
+# User-specific files
+.git/info/exclude # Local ignore rules
+
+# Test coverage reports
+coverage/
+
+# Compiled files and binaries
+*.pyc
+*.o
+*.exe
+
+*.json
+/docs
+venv
+venv/
