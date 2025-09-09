@@ -1,4 +1,5 @@
 import re
+import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -67,7 +68,10 @@ class ODTProcessor:
 
                 for img_path in image_files:
                     img_data = odt_zip.read(img_path)
-                    img_name = Path(img_path).name
+                    img_name = Path(img_path).name  # image1, image2 etc
+                    img_name = re.sub(
+                        "image\d+", f"image_{str(uuid.uuid4())[:5]}", img_name
+                    )
                     output_path = output_dir / img_name
 
                     with open(output_path, "wb") as f:
