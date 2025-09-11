@@ -1,19 +1,18 @@
-version: 1.0
-runtime: python311
-
+version: 1.0 # version of the specification
+runtime: python311 # runtime to use
 build:
   commands:
     build:
-      - echo "no-op build"   # Python 3.11 uses revised build; install deps in pre-run
+      - pip install -r requirements.txt # install dependencies
+
+  env: # define environment variables
+    - name: PORT
+      value: '8080'
 
 run:
-  runtime-version: 3.11
-  pre-run:
-    - pip3 install --upgrade pip
-    - pip3 install -r requirements.txt
-  command: python3 run.py
+  command: python3 run.py # command to run fastapi
   network:
-    port: 8080
+    port: 8080 # port AppRunner will expose
   secrets:
     - name: GOOGLE_CLOUD_SCOPES
       value-from: arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:google-cloud-scopes-XXXXX
