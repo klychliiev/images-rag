@@ -1,20 +1,20 @@
 version: 1.0
-runtime: python3
+runtime: python311
 
 build:
   commands:
     build:
-      - pip install --upgrade pip
-      - pip install -r requirements.txt
+      - echo "no-op build"   # Python 3.11 uses revised build; install deps in pre-run
 
 run:
   runtime-version: 3.11
+  pre-run:
+    - pip3 install --upgrade pip
+    - pip3 install -r requirements.txt
   command: python3 run.py
   network:
     port: 8080
-  # No plain env vars here since you asked to add *all* as secrets.
   secrets:
-    # ==== Secrets Manager (recommended) ====
     - name: GOOGLE_CLOUD_SCOPES
       value-from: arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:google-cloud-scopes-XXXXX
     - name: PINECONE_API_KEY
@@ -23,7 +23,6 @@ run:
       value-from: arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:openai-api-key-XXXXX
     - name: DEFAULT_INDEX_NAME
       value-from: arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:default-index-name-XXXXX
-
     - name: AWS_REGION
       value-from: arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:aws-region-XXXXX
     - name: AWS_ACCOUNT_ID
@@ -32,9 +31,3 @@ run:
       value-from: arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:registry-name-XXXXX
     - name: TAG
       value-from: arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:image-tag-XXXXX
-
-    # ==== OR, if you store some values in SSM Parameter Store, use these instead ====
-    # - name: OPENAI_API_KEY
-    #   value-from: arn:aws:ssm:REGION:ACCOUNT_ID:parameter/openai-api-key
-    # - name: PINECONE_API_KEY
-    #   value-from: arn:aws:ssm:REGION:ACCOUNT_ID:parameter/pinecone-api-key
