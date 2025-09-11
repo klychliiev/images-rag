@@ -1,5 +1,4 @@
 import hashlib
-import os
 import time
 from typing import Any
 
@@ -7,6 +6,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai.embeddings import OpenAIEmbeddings
 from loguru import logger
 from pinecone import Pinecone, ServerlessSpec
+
+from config import settings
 
 
 class PineconeDocumentIndexer:
@@ -64,8 +65,8 @@ class PineconeDocumentIndexer:
                     dimension=dimension,
                     metric=metric,
                     spec=ServerlessSpec(
-                        cloud=os.getenv("PINECONE_CLOUD", "aws"),  # make configurable
-                        region=os.getenv("PINECONE_REGION", "us-east-1"),
+                        cloud=settings.pinecone_cloud,  # make configurable
+                        region=settings.pinecone_region,
                     ),
                 )
                 logger.info(f"Index '{self.index_name}' creation requested.")

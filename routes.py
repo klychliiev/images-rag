@@ -74,7 +74,7 @@ async def upload_odt_file(
         indexer = PineconeDocumentIndexer(
             pinecone_api_key=settings.pinecone_api_key,
             openai_api_key=settings.openai_api_key,
-            index_name=settings.default_index_name,
+            index_name=settings.pinecone_index_default,
         )
         indexer.create_index_if_not_exists()
         metadata = {
