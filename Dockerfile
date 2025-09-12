@@ -1,25 +1,19 @@
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
+# Set working directory
 WORKDIR /app
 
-COPY requirements.txt /app/
-RUN python -m pip install --upgrade pip && \
-    pip install -r requirements.txt
+# Copy requirements first for better caching
+COPY requirements.txt .
 
-COPY . /app
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN useradd -m appuser && chown -R appuser:appuser /app
-USER appuser
+# Copy application code
+COPY . .
 
+# Expose port (App Runner typically uses 8000)
 EXPOSE 8000
 
+# Command to run the application
 CMD ["python3", "run.py"]

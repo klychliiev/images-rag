@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     aws_account_id: str
     registry_name: str
     tag: str
+    
+    google_token_json: dict 
+    google_client_id: str
+    google_client_secret: str
+    google_redirect_uris: str
+    google_auth_uri: str
+    google_token_uri: str
+    
 
 
 settings = Settings()

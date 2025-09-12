@@ -1,0 +1,13 @@
+version: 1.0
+runtime: docker
+build:
+  commands:
+    build:
+      - echo Build started on `date`
+      - echo Building the Docker image...
+run:
+  runtime-version: latest
+  command: python3 run.py
+  network:
+    port: 8000
+    env: PORT

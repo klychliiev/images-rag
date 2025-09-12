@@ -7,12 +7,14 @@ import subprocess
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+import json
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from config import settings
 
 # Google API settings
 SCOPES = ["https://www.googleapis.com/auth/drive"]
@@ -409,18 +411,33 @@ def create_markdown_with_drive_links(
 
 def get_service():
     creds = None
-    if Path("token.json").exists():
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    token_json = settings.google_token_json
+    if isinstance(token_json, str):
+        token_info = json.loads(token_json)
+    else:
+        token_info = token_json
+        
+    creds = Credentials.from_authorized_user_info(json.loads(token_info), [settings.google_cloud_scopes])
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_local_server(port=0)
 
-        with open("token.json", "w") as token:
-            token.write(creds.to_json())
+            settings.google_token_json = creds.to_json()
+        else:
+            client_config = {
+                "installed": {
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
+                    "redirect_uris": settings.google_redirect_uris,
+                    "auth_uri": settings.google_auth_uri,
+                    "token_uri": settings.google_token_uri,
+                }
+            }
+            flow = InstalledAppFlow.from_client_config(client_config, [settings.google_cloud_scopes])
+            creds = flow.run_local_server(port=0)
+            # If you don’t want a token file, you can keep creds only in env/secret store:
+            # os.environ["GOOGLE_TOKEN_JSON"] = creds.to_json()
 
     return build("drive", "v3", credentials=creds)
 

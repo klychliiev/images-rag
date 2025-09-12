@@ -43,14 +43,14 @@ async def upload_odt_file(
 
         drive_links: dict[str, str] = {}
         if upload_images_to_drive and extracted_images:
-            try:
-                drive_links = upload_images_to_folder(
-                    image_paths=extracted_images,
-                    folder_name=drive_folder_name or "Invoice Images",
-                )
-                logger.success(f"Uploaded {len(drive_links)} images to Drive.")
-            except Exception as e:
-                logger.error(f"⚠️ Drive upload failed: {e}")
+            # try:
+            drive_links = upload_images_to_folder(
+                image_paths=extracted_images,
+                folder_name=drive_folder_name or "Invoice Images",
+            )
+            logger.success(f"Uploaded {len(drive_links)} images to Drive.")
+            # except Exception as e:
+            #     logger.error(f"⚠️ Drive upload failed: {e}")
 
         try:
             if drive_links:
