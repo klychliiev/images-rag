@@ -417,7 +417,7 @@ def get_service():
     else:
         token_info = token_json
         
-    creds = Credentials.from_authorized_user_info(json.loads(token_info), [settings.google_cloud_scopes])
+    creds = Credentials.from_authorized_user_info(token_info, [settings.google_cloud_scopes])
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -436,8 +436,6 @@ def get_service():
             }
             flow = InstalledAppFlow.from_client_config(client_config, [settings.google_cloud_scopes])
             creds = flow.run_local_server(port=0)
-            # If you don’t want a token file, you can keep creds only in env/secret store:
-            # os.environ["GOOGLE_TOKEN_JSON"] = creds.to_json()
 
     return build("drive", "v3", credentials=creds)
 
