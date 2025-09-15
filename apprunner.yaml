@@ -1,14 +1,10 @@
 version: 1.0
 runtime: python311
-
 build:
   commands:
     build:
-      - echo "Installing dependencies..."
-      - python -m pip install --upgrade pip setuptools wheel
-      - PIP_NO_CACHE_DIR=1 python -m pip install --prefer-binary -r requirements.txt
-      - echo "Build completed successfully"
-
+      - ls
+      - pip install -r requirements.txt
 run:
   runtime-version: 3.11
   command: python3 run.py
