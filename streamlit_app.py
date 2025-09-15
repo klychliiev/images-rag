@@ -147,9 +147,9 @@ if go:
 
                     left, right = st.columns([2, 1])
                     st.success("✅ Processed successfully")
-                    st.write(f"**Images detected:** {len(res['images'])}")
+                    st.subheader(f"Images detected: {len(res['images'])}")
                     if res["drive_links"]:
-                        st.subheader("Image links")
+                        st.write("### Image links")
                         st.json(res["drive_links"])
 
                 except Exception as e:
