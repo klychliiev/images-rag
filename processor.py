@@ -352,3 +352,205 @@ class ODTProcessor:
             result = re.sub(r"\n{3,}", "\n\n", result)
             result = re.sub(r"[ \t]+\n", "\n", result)
             return result
+
+
+# --- add below your ODTProcessor in processor.py ---
+
+import io
+import zipfile
+from pathlib import Path
+from typing import Tuple, Dict, List
+
+# -------- PDF --------
+class PDFProcessor:
+    """Extract text & images from PDFs; prefers PyMuPDF (fitz), falls back to PyPDF2 for text only."""
+    @staticmethod
+    def extract_images_from_pdf(pdf_path: Path, output_dir: Path) -> Tuple[List[Path], Dict[str, str]]:
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            logger.warning("PyMuPDF not installed; skipping PDF image extraction. `pip install pymupdf`")
+            return [], {}
+
+        output_dir.mkdir(exist_ok=True)
+        extracted, mapping = [], {}
+        doc = fitz.open(pdf_path)
+        for pno in range(len(doc)):
+            page = doc[pno]
+            for idx, img in enumerate(page.get_images(full=True)):
+                xref = img[0]
+                pix = fitz.Pixmap(doc, xref)
+                ext = ".png" if not pix.alpha and pix.colorspace.n == 3 else ".png"
+                name = f"pdf_{pno+1}_{idx+1}_{uuid.uuid4().hex[:6]}{ext}"
+                out = output_dir / name
+                if pix.n >= 5:  # CMYK
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                pix.save(out)
+                extracted.append(out)
+                mapping[f"p{pno+1}_{xref}"] = name
+        doc.close()
+        logger.info(f"📷 PDF images extracted: {len(extracted)}")
+        return extracted, mapping
+
+    @staticmethod
+    def extract_text_from_pdf(pdf_path: Path) -> str:
+        # Try PyMuPDF first (better text layout), then PyPDF2.
+        try:
+            import fitz
+            with fitz.open(pdf_path) as doc:
+                text = []
+                for p in doc:
+                    text.append(p.get_text())
+                return "\n\n".join(ODTProcessor.clean_text(t) for t in text if t)
+        except Exception:
+            pass
+
+        try:
+            import PyPDF2
+            text = []
+            with open(pdf_path, "rb") as f:
+                r = PyPDF2.PdfReader(f)
+                for page in r.pages:
+                    text.append(page.extract_text() or "")
+            return "\n\n".join(ODTProcessor.clean_text(t) for t in text if t)
+        except Exception as e:
+            raise RuntimeError(f"PDF text extraction failed: {e}")
+
+    @staticmethod
+    def extract_text_with_links(pdf_path: Path, image_mapping: dict, drive_links: dict) -> str:
+        """Simple heuristic: put page text, then any images found on that page (if PyMuPDF available)."""
+        try:
+            import fitz
+            def _link(name: str) -> str | None:
+                direct = _direct_link_for(drive_links, name)
+                return f"![{name}]({direct})" if direct else None
+
+            out = []
+            with fitz.open(pdf_path) as doc:
+                for pno, page in enumerate(doc, start=1):
+                    out.append(f"# Page {pno}\n\n")
+                    out.append(ODTProcessor.clean_text(page.get_text() or "") + "\n\n")
+                    imgs = page.get_images(full=True)
+                    for idx, img in enumerate(imgs):
+                        key = f"p{pno}_{img[0]}"
+                        fname = image_mapping.get(key)
+                        if fname:
+                            md = _link(fname)
+                            if md:
+                                out.append(md + "\n\n")
+            return "".join(out)
+        except Exception:
+            # Fallback: just text
+            return PDFProcessor.extract_text_from_pdf(pdf_path)
+
+
+# -------- DOCX --------
+class DOCXProcessor:
+    """Extract text & images from .docx; uses python-docx."""
+    @staticmethod
+    def extract_images_from_docx(docx_path: Path, output_dir: Path) -> Tuple[List[Path], Dict[str, str]]:
+        output_dir.mkdir(exist_ok=True)
+        extracted, mapping = [], {}
+        with zipfile.ZipFile(docx_path) as z:
+            candidates = [n for n in z.namelist() if n.startswith("word/media/")]
+            for n in candidates:
+                ext = Path(n).suffix.lower()
+                if ext:
+                    data = z.read(n)
+                    new_name = f"docx_{uuid.uuid4().hex[:6]}{ext}"
+                    out = output_dir / new_name
+                    out.write_bytes(data)
+                    extracted.append(out)
+                    mapping[n] = new_name
+        logger.info(f"📷 DOCX images extracted: {len(extracted)}")
+        return extracted, mapping
+
+    @staticmethod
+    def extract_text_from_docx(docx_path: Path) -> str:
+        try:
+            from docx import Document
+        except ImportError:
+            raise RuntimeError("python-docx not installed. `pip install python-docx`")
+
+        doc = Document(docx_path)
+        lines: List[str] = []
+
+        # Headings & paragraphs
+        for p in doc.paragraphs:
+            txt = ODTProcessor.clean_text(p.text)
+            if not txt:
+                continue
+            if p.style and str(p.style.name).lower().startswith("heading"):
+                # Try to parse heading level; defaults to 1
+                level = 1
+                for n in range(1, 7):
+                    if f"heading {n}" in str(p.style.name).lower():
+                        level = n
+                        break
+                lines.append("#" * level + " " + txt + "\n\n")
+            else:
+                lines.append(txt + "\n\n")
+
+        # Tables → markdown
+        for t in doc.tables:
+            rows = []
+            for r in t.rows:
+                rows.append([ODTProcessor.clean_text(c.text) or " " for c in r.cells])
+            if rows:
+                lines.append("| " + " | ".join(rows[0]) + " |\n")
+                lines.append("| " + " | ".join(["---"] * len(rows[0])) + " |\n")
+                for r in rows[1:]:
+                    while len(r) < len(rows[0]):
+                        r.append(" ")
+                    lines.append("| " + " | ".join(r[:len(rows[0])]) + " |\n")
+                lines.append("\n")
+
+        return "".join(lines)
+
+    @staticmethod
+    def extract_text_with_links(docx_path: Path, image_mapping: dict, drive_links: dict) -> str:
+        """
+        Best-effort: get normal text; append an 'Images' section with embedded Drive links
+        (inline placement inside paragraphs requires deeper XML parsing).
+        """
+        text = DOCXProcessor.extract_text_from_docx(docx_path)
+        if not image_mapping:
+            return text
+        parts = [text, "## Images\n\n"]
+        for _, mapped in image_mapping.items():
+            link = _direct_link_for(drive_links, mapped)
+            if link:
+                parts.append(f"![{mapped}]({link})\n\n")
+        return "".join(parts)
+
+
+# -------- Dispatcher --------
+def process_any(path: Path, output_dir: Path, drive_links: dict | None = None) -> dict:
+    """
+    Extract text + images from path based on extension.
+    Returns: {markdown:str, images:List[Path], image_mapping:dict}
+    If drive_links provided {filename: url}, text will embed direct links when possible.
+    """
+    ext = path.suffix.lower()
+    output_dir.mkdir(exist_ok=True, parents=True)
+    drive_links = drive_links or {}
+
+    if ext == ".odt":
+        imgs, mapping = ODTProcessor.extract_images_from_odt(path, output_dir)
+        md = (ODTProcessor.extract_text_with_links(path, mapping, drive_links)
+              if drive_links else ODTProcessor.extract_text_from_odt(path))
+        return {"markdown": md, "images": imgs, "image_mapping": mapping}
+
+    if ext == ".pdf":
+        imgs, mapping = PDFProcessor.extract_images_from_pdf(path, output_dir)
+        md = (PDFProcessor.extract_text_with_links(path, mapping, drive_links)
+              if drive_links else PDFProcessor.extract_text_from_pdf(path))
+        return {"markdown": md, "images": imgs, "image_mapping": mapping}
+
+    if ext == ".docx":
+        imgs, mapping = DOCXProcessor.extract_images_from_docx(path, output_dir)
+        md = (DOCXProcessor.extract_text_with_links(path, mapping, drive_links)
+              if drive_links else DOCXProcessor.extract_text_from_docx(path))
+        return {"markdown": md, "images": imgs, "image_mapping": mapping}
+
+    raise ValueError(f"Unsupported extension: {ext}")
