@@ -15,42 +15,42 @@ run:
   env:
     # OpenAI Configuration
     - name: OPENAI_API_KEY
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:OPENAI_API_KEY}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:OPENAI_API_KEY}}"
     
     # Pinecone Configuration
     - name: PINECONE_API_KEY
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:PINECONE_API_KEY}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:PINECONE_API_KEY}}"
     - name: PINECONE_INDEX_DEFAULT
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:PINECONE_INDEX_DEFAULT}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:PINECONE_INDEX_DEFAULT}}"
     - name: PINECONE_CLOUD
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:PINECONE_CLOUD}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:PINECONE_CLOUD}}"
     - name: PINECONE_REGION
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:PINECONE_REGION}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:PINECONE_REGION}}"
     
     # Google Cloud Configuration
     - name: GOOGLE_CLOUD_SCOPES
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:GOOGLE_CLOUD_SCOPES}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:GOOGLE_CLOUD_SCOPES}}"
     - name: GOOGLE_TOKEN_JSON
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:GOOGLE_TOKEN_JSON}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:GOOGLE_TOKEN_JSON}}"
     - name: GOOGLE_CLIENT_ID
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:GOOGLE_CLIENT_ID}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:GOOGLE_CLIENT_ID}}"
     - name: GOOGLE_CLIENT_SECRET
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:GOOGLE_CLIENT_SECRET}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:GOOGLE_CLIENT_SECRET}}"
     - name: GOOGLE_REDIRECT_URIS
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:GOOGLE_REDIRECT_URIS}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:GOOGLE_REDIRECT_URIS}}"
     - name: GOOGLE_AUTH_URI
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:GOOGLE_AUTH_URI}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:GOOGLE_AUTH_URI}}"
     - name: GOOGLE_TOKEN_URI
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:GOOGLE_TOKEN_URI}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:GOOGLE_TOKEN_URI}}"
     
     # AWS Configuration
     - name: AWS_REGION
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:AWS_REGION}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:AWS_REGION}}"
     - name: AWS_ACCOUNT_ID
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:AWS_ACCOUNT_ID}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:AWS_ACCOUNT_ID}}"
     
     # Docker Registry Configuration
     - name: REGISTRY_NAME
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:REGISTRY_NAME}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:REGISTRY_NAME}}"
     - name: TAG
-      value: "{{resolve:secretsmanager:secret-raq-pipeline:SecretString:TAG}}"
+      value: "{{resolve:secretsmanager:secret-rag-pipeline:SecretString:TAG}}"
