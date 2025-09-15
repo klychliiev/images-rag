@@ -381,7 +381,7 @@ class PDFProcessor:
                 xref = img[0]
                 pix = fitz.Pixmap(doc, xref)
                 ext = ".png" if not pix.alpha and pix.colorspace.n == 3 else ".png"
-                name = f"pdf_{pno+1}_{idx+1}_{uuid.uuid4().hex[:6]}{ext}"
+                name = f"image_{uuid.uuid4().hex[:7]}{ext}"
                 out = output_dir / name
                 if pix.n >= 5:  # CMYK
                     pix = fitz.Pixmap(fitz.csRGB, pix)
