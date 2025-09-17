@@ -3,13 +3,15 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-
 from loguru import logger
+import io
+from typing import Tuple, Dict, List
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".svg", ".webp"}
 
 
 def _direct_link_for(drive_links: dict, filename: str) -> str | None:
+    """Convert Google Drive sharing link to direct view link"""
     url = drive_links.get(filename)
     if not url:
         return None
@@ -33,7 +35,6 @@ class ODTProcessor:
             return ""
 
         text = re.sub(r"\s+", " ", text.strip())
-
         text = text.replace("\n", " ").replace("\r", " ")
 
         return text
@@ -68,10 +69,11 @@ class ODTProcessor:
 
                 for img_path in image_files:
                     img_data = odt_zip.read(img_path)
-                    img_name = Path(img_path).name  # image1, image2 etc
-                    img_name = re.sub(
-                        "image\d+", f"image_{str(uuid.uuid4())[:5]}", img_name
-                    )
+                    img_name = Path(img_path).name
+                    # Create unique filename to avoid collisions
+                    base_name = Path(img_name).stem  # filename without extension
+                    ext = Path(img_name).suffix      # extension with dot
+                    img_name = f"image_{str(uuid.uuid4())[:5]}_{base_name}{ext}"
                     output_path = output_dir / img_name
 
                     with open(output_path, "wb") as f:
@@ -113,7 +115,6 @@ class ODTProcessor:
                 if body is None:
                     return ""
 
-                # Process elements in document order
                 processed_elements = set()
 
                 for elem in body:
@@ -227,10 +228,17 @@ class ODTProcessor:
         odt_path: Path, image_mapping: dict, drive_links: dict
     ) -> str:
         """
-        Like extract_text_from_odt, but replaces image refs with Drive links when available.
+        Extract text from ODT and replace image references with Drive links when available.
         """
         if not odt_path.exists():
             raise FileNotFoundError(f"ODT file not found: {odt_path}")
+
+        logger.info(f"🔗 Processing ODT with {len(image_mapping)} images and {len(drive_links)} drive links")
+        
+        # Debug logging
+        for orig_path, mapped_name in image_mapping.items():
+            drive_link = drive_links.get(mapped_name)
+            logger.info(f"Image mapping: {orig_path} -> {mapped_name} -> {drive_link}")
 
         with zipfile.ZipFile(odt_path, "r") as odt_zip:
             content_xml = odt_zip.read("content.xml").decode("utf-8")
@@ -248,122 +256,171 @@ class ODTProcessor:
             if body is None:
                 return ""
 
-            out = []
-            processed = set()
+            def find_mapped_filename_for_href(href: str) -> str | None:
+                """Find the mapped filename for an image href"""
+                logger.debug(f"Looking for href: {href}")
+                
+                # Try exact match first
+                if href in image_mapping:
+                    return image_mapping[href]
+                
+                # Try matching by filename
+                href_filename = Path(href).name
+                for original_path, mapped_filename in image_mapping.items():
+                    original_filename = Path(original_path).name
+                    if original_filename == href_filename:
+                        logger.debug(f"Found match: {original_filename} -> {mapped_filename}")
+                        return mapped_filename
+                
+                # Try partial matching
+                for original_path, mapped_filename in image_mapping.items():
+                    if original_path.endswith(href) or href.endswith(Path(original_path).name):
+                        logger.debug(f"Found partial match: {original_path} -> {mapped_filename}")
+                        return mapped_filename
+                
+                logger.warning(f"No mapping found for href: {href}")
+                return None
 
             def img_md_for_href(href: str) -> str | None:
-                target = None
-                for original_path, mapped_filename in image_mapping.items():
-                    if original_path.endswith(href) or href.endswith(
-                        Path(original_path).name
-                    ):
-                        target = mapped_filename
-                        break
-                if not target:
+                """Convert image href to markdown with Drive link"""
+                mapped_filename = find_mapped_filename_for_href(href)
+                if not mapped_filename:
                     return None
-                link = _direct_link_for(drive_links, target)
-                if not link:
+                
+                drive_link = _direct_link_for(drive_links, mapped_filename)
+                if not drive_link:
+                    logger.warning(f"No drive link found for: {mapped_filename}")
                     return None
-                return f"![{target}]({link})"
+                
+                logger.info(f"Creating markdown link: ![{mapped_filename}]({drive_link})")
+                return f"[{mapped_filename}]({drive_link})"
 
             def walk(elem):
-                if id(elem) in processed:
-                    return ""
-                processed.add(id(elem))
-                tag = elem.tag
+                processed = set()
+                
+                def process_elem(elem):
+                    if id(elem) in processed:
+                        return ""
+                    processed.add(id(elem))
+                    
+                    tag = elem.tag
 
-                if tag.endswith("}h"):
-                    level = elem.get(
-                        "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}outline-level",
-                        "1",
-                    )
-                    txt = ODTProcessor.clean_text("".join(elem.itertext()))
-                    return ("#" * int(level)) + f" {txt}\n\n" if txt else ""
+                    if tag.endswith("}h"):
+                        level = elem.get(
+                            "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}outline-level",
+                            "1",
+                        )
+                        txt = ODTProcessor.clean_text("".join(elem.itertext()))
+                        return ("#" * int(level)) + f" {txt}\n\n" if txt else ""
 
-                if tag.endswith("}p"):
-                    parts = []
-                    if elem.text:
-                        t = ODTProcessor.clean_text(elem.text)
-                        if t:
-                            parts.append(t)
-                    for child in elem:
-                        if child.tag.endswith("}frame"):
-                            img = child.find(".//draw:image", ns)
-                            if img is not None:
-                                href = img.get("{http://www.w3.org/1999/xlink}href", "")
-                                md = img_md_for_href(href)
-                                if md:
-                                    parts.append(md)
-                        else:
-                            t = ODTProcessor.clean_text("".join(child.itertext()))
+                    if tag.endswith("}p"):
+                        parts = []
+                        
+                        # Process text and child elements
+                        if elem.text:
+                            t = ODTProcessor.clean_text(elem.text)
                             if t:
                                 parts.append(t)
-                        if child.tail:
-                            tail = ODTProcessor.clean_text(child.tail)
-                            if tail:
-                                parts.append(tail)
-                    if not parts:
-                        t = ODTProcessor.clean_text("".join(elem.itertext()))
-                        if t:
-                            parts = [t]
+                        
+                        for child in elem:
+                            if child.tag.endswith("}frame"):
+                                # Look for images in frames
+                                img = child.find(".//draw:image", ns)
+                                if img is not None:
+                                    href = img.get("{http://www.w3.org/1999/xlink}href", "")
+                                    logger.debug(f"Found image with href: {href}")
+                                    if href:
+                                        md = img_md_for_href(href)
+                                        if md:
+                                            parts.append(md)
+                                        else:
+                                            # Fallback: just mention the image
+                                            parts.append(f"[Image: {Path(href).name}]")
+                            else:
+                                # Process other child elements
+                                child_text = process_elem(child)
+                                if child_text:
+                                    parts.append(child_text)
+                            
+                            if child.tail:
+                                tail = ODTProcessor.clean_text(child.tail)
+                                if tail:
+                                    parts.append(tail)
+                        
+                        # If no parts found, get all text
+                        if not parts:
+                            t = ODTProcessor.clean_text("".join(elem.itertext()))
+                            if t:
+                                parts = [t]
 
-                    buf = []
-                    for i, p in enumerate(parts):
-                        if p.startswith("!["):
-                            if buf and not buf[-1].endswith("\n\n"):
-                                buf.append("\n\n")
-                            buf.append(p)
-                            buf.append("\n\n")
-                        else:
-                            if buf and not buf[-1].endswith((" ", "\n", "\n\n")):
-                                buf.append(" ")
-                            buf.append(p)
-                    txt = "".join(buf)
-                    txt = re.sub(r" +", " ", txt)
-                    txt = re.sub(r"\n{3,}", "\n\n", txt)
-                    if txt and not txt.endswith("\n"):
-                        txt += "\n\n"
-                    return txt
+                        # Combine parts with proper spacing
+                        if parts:
+                            result = []
+                            for i, part in enumerate(parts):
+                                if part.startswith("![") or part.startswith("[Image:"):
+                                    # Image - add with newlines
+                                    if result and not result[-1].endswith("\n\n"):
+                                        result.append("\n\n")
+                                    result.append(part)
+                                    result.append("\n\n")
+                                else:
+                                    # Text - add with space if needed
+                                    if result and not result[-1].endswith((" ", "\n")):
+                                        result.append(" ")
+                                    result.append(part)
+                            
+                            txt = "".join(result)
+                            txt = re.sub(r" +", " ", txt)
+                            txt = re.sub(r"\n{3,}", "\n\n", txt)
+                            if txt and not txt.endswith("\n"):
+                                txt += "\n\n"
+                            return txt
+                        
+                        return ""
 
-                # lists
-                if tag.endswith("}list"):
-                    rows = []
-                    for item in elem.findall(".//text:list-item", ns):
-                        processed.add(id(item))
-                        t = ODTProcessor.clean_text("".join(item.itertext()))
-                        if t:
-                            rows.append(f"- {t}")
-                    return "\n".join(rows) + "\n\n" if rows else ""
+                    # Handle lists
+                    if tag.endswith("}list"):
+                        rows = []
+                        for item in elem.findall(".//text:list-item", ns):
+                            processed.add(id(item))
+                            t = ODTProcessor.clean_text("".join(item.itertext()))
+                            if t:
+                                rows.append(f"- {t}")
+                        return "\n".join(rows) + "\n\n" if rows else ""
 
-                if tag.endswith("}table"):
-                    return ODTProcessor.process_table(elem, ns, processed)
+                    # Handle tables
+                    if tag.endswith("}table"):
+                        return ODTProcessor.process_table(elem, ns, processed)
 
-                acc = []
-                for ch in elem:
-                    v = walk(ch)
-                    if v:
-                        acc.append(v)
-                return "".join(acc)
+                    # Handle other elements recursively
+                    acc = []
+                    for ch in elem:
+                        v = process_elem(ch)
+                        if v:
+                            acc.append(v)
+                    return "".join(acc)
+                
+                return process_elem(elem)
 
+            # Process all body elements
+            out = []
             for child in body:
-                out.append(walk(child))
+                result = walk(child)
+                if result:
+                    out.append(result)
 
-            result = "".join(out)
-            result = re.sub(r"\n{3,}", "\n\n", result)
-            result = re.sub(r"[ \t]+\n", "\n", result)
-            return result
+            final_result = "".join(out)
+            final_result = re.sub(r"\n{3,}", "\n\n", final_result)
+            final_result = re.sub(r"[ \t]+\n", "\n", final_result)
+            
+            logger.info(f"📄 Final result length: {len(final_result)} characters")
+            return final_result
 
-
-# --- add below your ODTProcessor in processor.py ---
-
-import io
-import zipfile
-from pathlib import Path
-from typing import Tuple, Dict, List
 
 # -------- PDF --------
 class PDFProcessor:
     """Extract text & images from PDFs; prefers PyMuPDF (fitz), falls back to PyPDF2 for text only."""
+    
     @staticmethod
     def extract_images_from_pdf(pdf_path: Path, output_dir: Path) -> Tuple[List[Path], Dict[str, str]]:
         try:
@@ -447,6 +504,7 @@ class PDFProcessor:
 # -------- DOCX --------
 class DOCXProcessor:
     """Extract text & images from .docx; uses python-docx."""
+    
     @staticmethod
     def extract_images_from_docx(docx_path: Path, output_dir: Path) -> Tuple[List[Path], Dict[str, str]]:
         output_dir.mkdir(exist_ok=True)
@@ -525,32 +583,55 @@ class DOCXProcessor:
 
 
 # -------- Dispatcher --------
-def process_any(path: Path, output_dir: Path, drive_links: dict | None = None) -> dict:
+def process_any(path: Path, output_dir: Path, drive_links: dict | None = None, 
+                existing_image_mapping: dict | None = None) -> dict:
     """
     Extract text + images from path based on extension.
     Returns: {markdown:str, images:List[Path], image_mapping:dict}
     If drive_links provided {filename: url}, text will embed direct links when possible.
+    If existing_image_mapping provided, reuse it instead of creating new one.
     """
     ext = path.suffix.lower()
     output_dir.mkdir(exist_ok=True, parents=True)
     drive_links = drive_links or {}
 
     if ext == ".odt":
-        imgs, mapping = ODTProcessor.extract_images_from_odt(path, output_dir)
+        if existing_image_mapping:
+            # Reuse existing mapping - don't extract images again
+            imgs = [output_dir / fname for fname in existing_image_mapping.values() 
+                   if (output_dir / fname).exists()]
+            mapping = existing_image_mapping
+        else:
+            # First time - extract images
+            imgs, mapping = ODTProcessor.extract_images_from_odt(path, output_dir)
+        
         md = (ODTProcessor.extract_text_with_links(path, mapping, drive_links)
               if drive_links else ODTProcessor.extract_text_from_odt(path))
         return {"markdown": md, "images": imgs, "image_mapping": mapping}
 
     if ext == ".pdf":
-        imgs, mapping = PDFProcessor.extract_images_from_pdf(path, output_dir)
+        if existing_image_mapping:
+            imgs = [output_dir / fname for fname in existing_image_mapping.values() 
+                   if (output_dir / fname).exists()]
+            mapping = existing_image_mapping
+        else:
+            imgs, mapping = PDFProcessor.extract_images_from_pdf(path, output_dir)
+        
         md = (PDFProcessor.extract_text_with_links(path, mapping, drive_links)
               if drive_links else PDFProcessor.extract_text_from_pdf(path))
         return {"markdown": md, "images": imgs, "image_mapping": mapping}
 
     if ext == ".docx":
-        imgs, mapping = DOCXProcessor.extract_images_from_docx(path, output_dir)
+        if existing_image_mapping:
+            imgs = [output_dir / fname for fname in existing_image_mapping.values() 
+                   if (output_dir / fname).exists()]
+            mapping = existing_image_mapping
+        else:
+            imgs, mapping = DOCXProcessor.extract_images_from_docx(path, output_dir)
+        
         md = (DOCXProcessor.extract_text_with_links(path, mapping, drive_links)
               if drive_links else DOCXProcessor.extract_text_from_docx(path))
         return {"markdown": md, "images": imgs, "image_mapping": mapping}
 
     raise ValueError(f"Unsupported extension: {ext}")
+

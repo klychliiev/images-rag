@@ -9,14 +9,11 @@ from typing import Dict, List
 import streamlit as st
 
 from config import settings
-from processor import process_any  # uses ODT/PDF/DOCX automatically
+from processor import process_any
 from drive_uploader import upload_images_to_folder
 from pinecone_service import PineconeDocumentIndexer
 
 
-# ------------------------
-# Page & styles
-# ------------------------
 st.set_page_config(page_title="Docs → Markdown & Pinecone", page_icon="📄", layout="centered")
 
 st.markdown(
@@ -95,38 +92,57 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
         in_path.write_bytes(upload.getvalue())
 
         img_dir = tmpdir / "images"
+        
         # First pass: extract images & text without Drive links (we need filenames)
         extracted = process_any(in_path, img_dir, drive_links=None)
         images: List[Path] = extracted["images"]
+        original_image_mapping = extracted["image_mapping"]  # Save this!
         markdown = extracted["markdown"]
 
         # Optional Drive upload, then re-extract text with direct links if possible
         drive_links: Dict[str, str] = {}
         if images:
-            try:
+            st.info(f"📤 Uploading {len(images)} images to Drive folder: {drive_folder}")
+            with st.spinner("Uploading to Google Drive..."):
                 drive_links = upload_images_to_folder(images, drive_folder)  # {filename: direct_link}
-                # Re-run to embed direct-view links into markdown
-                extracted2 = process_any(in_path, img_dir, drive_links=drive_links)
-                markdown = extracted2["markdown"]
-            except Exception as e:
-                st.warning(f"⚠️ Could not upload images to Drive: {e}")
+            
+            st.success(f"✅ Uploaded {len(drive_links)} images to Drive")
+            
+            if drive_links:
+                # Import the processor class to call the method directly
+                from processor import ODTProcessor
+                
+                # Use the original image mapping from first extraction
+                markdown = ODTProcessor.extract_text_with_links(
+                    in_path, original_image_mapping, drive_links
+                )
+            else:
+                st.warning("⚠️ No images were uploaded to Drive")
+                    
+        # Index text in Pinecone
+        st.info("💾 Indexing document in Pinecone...")
+        metadata = {
+            "filename": upload.name,
+            "uploaded_at": datetime.utcnow().isoformat(),
+            "content_ext": Path(upload.name).suffix.lower(),
+            "images_uploaded": bool(drive_links),
+            "images_count": len(images),
+            "drive_links_count": len(drive_links),
+        }
+        
+        try:
+            stats = indexer.process_and_index(markdown, metadata)
+            st.success("✅ Document indexed in Pinecone")
+        except Exception as e:
+            st.error(f"❌ Failed to index in Pinecone: {e}")
+            stats = {"error": str(e)}
 
-    # Index text in Pinecone
-    metadata = {
-        "filename": upload.name,
-        "uploaded_at": datetime.utcnow().isoformat(),
-        "content_ext": Path(upload.name).suffix.lower(),
-        "images_uploaded": bool(drive_links),
-    }
-    stats = indexer.process_and_index(markdown, metadata)
-
-    return {
-        "markdown": markdown,
-        "images": [p.name for p in images],
-        "drive_links": drive_links,  # {filename: direct_link}
-        "stats": stats,
-    }
-
+        return {
+            "markdown": markdown,
+            "images": [p.name for p in images],
+            "drive_links": drive_links,  # {filename: direct_link}
+            "stats": stats,
+        }
 
 # ------------------------
 # Main action
@@ -146,7 +162,7 @@ if go:
                     res = process_one(f, idx)
 
                     left, right = st.columns([2, 1])
-                    st.success("✅ Processed successfully")
+
                     st.subheader(f"Images detected: {len(res['images'])}")
                     if res["drive_links"]:
                         st.write("### Image links")
@@ -157,4 +173,3 @@ if go:
 
             progress.progress(i / len(files))
 
-        st.success("All done!")
