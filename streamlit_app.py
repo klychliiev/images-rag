@@ -40,13 +40,12 @@ st.markdown(
 
 st.markdown('<div class="header-title">📄 Document Processor</div>', unsafe_allow_html=True)
 
-is_authed = auth_sidebar()  
-
+is_authed = auth_sidebar()  # show sidebar auth and capture auth status
 
 st.sidebar.header("⚙️ Options")
 disabled = not is_authed
 
-default_folder = f"doc-images-{datetime.utcnow().strftime('%Y%m%d')}"
+default_folder = "support-agent-images"
 drive_folder = st.sidebar.text_input("Drive folder name", value=default_folder, disabled=disabled)
 
 pinecone_index_name = st.sidebar.text_input(
@@ -55,6 +54,7 @@ pinecone_index_name = st.sidebar.text_input(
     help="Name of the Pinecone index where extracted text will be stored.",
     disabled=disabled,
 )
+
 files = st.file_uploader(
     "Upload files",
     type=["odt", "pdf", "docx"],
@@ -89,6 +89,7 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
 
         img_dir = tmpdir / "images"
 
+        # First pass: extract text + local images (no Drive links yet)
         extracted = process_any(in_path, img_dir, drive_links=None)
         images: List[Path] = extracted["images"]
         original_image_mapping = extracted["image_mapping"]
@@ -98,18 +99,21 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
         if images:
             st.info(f"📤 Uploading {len(images)} images to Drive folder: {drive_folder}")
             with st.spinner("Uploading to Google Drive..."):
-                drive_links = upload_images_to_folder(images, drive_folder)  # {filename: direct_link}
+                # {filename_on_disk: drive_url}
+                drive_links = upload_images_to_folder(images, drive_folder)
 
             st.success(f"✅ Uploaded {len(drive_links)} images to Drive")
 
-            if drive_links:
-                from processor import ODTProcessor
-
-                markdown = ODTProcessor.extract_text_with_links(
-                    in_path, original_image_mapping, drive_links
-                )
-            else:
-                st.warning("⚠️ No images were uploaded to Drive")
+            # Rebuild markdown for the SAME file type, embedding Drive links
+            rebuilt = process_any(
+                in_path,
+                img_dir,
+                drive_links=drive_links,
+                existing_image_mapping=original_image_mapping,
+            )
+            markdown = rebuilt["markdown"]
+        else:
+            st.info("ℹ️ No images detected in the document.")
 
         st.info("💾 Indexing document in Pinecone...")
         metadata = {
@@ -134,6 +138,7 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
             "drive_links": drive_links,  # {filename: direct_link}
             "stats": stats,
         }
+
 
 go = st.button("🚀 Process", type="primary", use_container_width=True, disabled=disabled)
 

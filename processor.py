@@ -293,7 +293,8 @@ class ODTProcessor:
                     return None
                 
                 logger.info(f"Creating markdown link: ![{mapped_filename}]({drive_link})")
-                return f"[{mapped_filename}]({drive_link})"
+                # FIX: render as image, not just a link
+                return f"![{mapped_filename}]({drive_link})"
 
             def walk(elem):
                 processed = set()
@@ -634,4 +635,3 @@ def process_any(path: Path, output_dir: Path, drive_links: dict | None = None,
         return {"markdown": md, "images": imgs, "image_mapping": mapping}
 
     raise ValueError(f"Unsupported extension: {ext}")
-
