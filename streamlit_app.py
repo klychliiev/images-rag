@@ -13,6 +13,8 @@ from processor import process_any
 from drive_uploader import upload_images_to_folder
 from pinecone_service import PineconeDocumentIndexer
 
+from auth import auth_sidebar
+
 
 st.set_page_config(page_title="Docs → Markdown & Pinecone", page_icon="📄", layout="centered")
 
@@ -29,50 +31,44 @@ st.markdown(
       .block-container {
         max-width: 900px;
         margin: 0 auto;
-        padding-top: 6rem;  /* ⬅ Increased from 2rem */
+        padding-top: 6rem;
       }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-
 st.markdown('<div class="header-title">📄 Document Processor</div>', unsafe_allow_html=True)
 
+is_authed = auth_sidebar()  
 
-# ------------------------
-# Sidebar options
-# ------------------------
+
 st.sidebar.header("⚙️ Options")
+disabled = not is_authed
 
-# Folder for uploaded images
 default_folder = f"doc-images-{datetime.utcnow().strftime('%Y%m%d')}"
-drive_folder = st.sidebar.text_input("Drive folder name", value=default_folder)
+drive_folder = st.sidebar.text_input("Drive folder name", value=default_folder, disabled=disabled)
 
-# Pinecone index name (new option)
 pinecone_index_name = st.sidebar.text_input(
     "Pinecone index name",
     value=settings.pinecone_index_default,
-    help="Name of the Pinecone index where extracted text will be stored."
+    help="Name of the Pinecone index where extracted text will be stored.",
+    disabled=disabled,
 )
-
-
-# Upload control
 files = st.file_uploader(
     "Upload files",
     type=["odt", "pdf", "docx"],
     accept_multiple_files=True,
     help="Supported formats: .odt, .pdf, .docx",
+    disabled=disabled,
 )
 
-# Show info about formats
-st.info("📂 **Supported file formats:** ODT, PDF, DOCX. "
-        "Images embedded in documents will also be extracted automatically.")
+st.info(
+    "📂 **Supported file formats:** ODT, PDF, DOCX. "
+    "Images embedded in documents will also be extracted automatically."
+)
 
 
-# ------------------------
-# Helpers
-# ------------------------
 def make_indexer() -> PineconeDocumentIndexer:
     """Create & prepare Pinecone indexer; override chunk settings from sidebar."""
     idx = PineconeDocumentIndexer(
@@ -92,34 +88,29 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
         in_path.write_bytes(upload.getvalue())
 
         img_dir = tmpdir / "images"
-        
-        # First pass: extract images & text without Drive links (we need filenames)
+
         extracted = process_any(in_path, img_dir, drive_links=None)
         images: List[Path] = extracted["images"]
-        original_image_mapping = extracted["image_mapping"]  # Save this!
+        original_image_mapping = extracted["image_mapping"]
         markdown = extracted["markdown"]
 
-        # Optional Drive upload, then re-extract text with direct links if possible
         drive_links: Dict[str, str] = {}
         if images:
             st.info(f"📤 Uploading {len(images)} images to Drive folder: {drive_folder}")
             with st.spinner("Uploading to Google Drive..."):
                 drive_links = upload_images_to_folder(images, drive_folder)  # {filename: direct_link}
-            
+
             st.success(f"✅ Uploaded {len(drive_links)} images to Drive")
-            
+
             if drive_links:
-                # Import the processor class to call the method directly
                 from processor import ODTProcessor
-                
-                # Use the original image mapping from first extraction
+
                 markdown = ODTProcessor.extract_text_with_links(
                     in_path, original_image_mapping, drive_links
                 )
             else:
                 st.warning("⚠️ No images were uploaded to Drive")
-                    
-        # Index text in Pinecone
+
         st.info("💾 Indexing document in Pinecone...")
         metadata = {
             "filename": upload.name,
@@ -129,7 +120,7 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
             "images_count": len(images),
             "drive_links_count": len(drive_links),
         }
-        
+
         try:
             stats = indexer.process_and_index(markdown, metadata)
             st.success("✅ Document indexed in Pinecone")
@@ -144,10 +135,11 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
             "stats": stats,
         }
 
-# ------------------------
-# Main action
-# ------------------------
-go = st.button("🚀 Process", type="primary", use_container_width=True)
+go = st.button("🚀 Process", type="primary", use_container_width=True, disabled=disabled)
+
+if not is_authed:
+    st.warning("You must sign in with your **@artisio.co** account to process files.")
+    st.stop()
 
 if go:
     if not files:
@@ -172,4 +164,3 @@ if go:
                     st.error(f"❌ {e}")
 
             progress.progress(i / len(files))
-

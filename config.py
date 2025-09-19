@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     google_auth_uri: str
     google_token_uri: str
     
+    supabase_url: str
+    supabase_anon_key: str
+    
+    acceptable_email_domain: str
+    
 
 
 settings = Settings()
