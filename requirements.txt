@@ -32,3 +32,4 @@ streamlit
 PyPDF2
 python-docx
 PyMuPDF
+supabase
