@@ -6,6 +6,7 @@ from pathlib import Path
 from loguru import logger
 import io
 from typing import Tuple, Dict, List
+import fitz
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".svg", ".webp"}
 
@@ -416,171 +417,372 @@ class ODTProcessor:
             
             logger.info(f"📄 Final result length: {len(final_result)} characters")
             return final_result
-
-
-# -------- PDF --------
-class PDFProcessor:
-    """Extract text & images from PDFs; prefers PyMuPDF (fitz), falls back to PyPDF2 for text only."""
+class ImprovedPDFProcessor:
+    """PDF processing that preserves document structure with proper image placement."""
     
     @staticmethod
-    def extract_images_from_pdf(pdf_path: Path, output_dir: Path) -> Tuple[List[Path], Dict[str, str]]:
-        try:
-            import fitz  # PyMuPDF
-        except ImportError:
-            logger.warning("PyMuPDF not installed; skipping PDF image extraction. `pip install pymupdf`")
-            return [], {}
-
+    def extract_images_from_pdf(pdf_path: Path, output_dir: Path) -> Tuple[List[Path], Dict[int, str]]:
+        """Extract images and return mapping of xref -> filename"""
         output_dir.mkdir(exist_ok=True)
-        extracted, mapping = [], {}
+        extracted = []
+        mapping = {}  # xref -> filename
+        
         doc = fitz.open(pdf_path)
+        processed_xrefs = set()
+        
+        logger.info(f"Processing PDF with {len(doc)} pages")
+        
         for pno in range(len(doc)):
-            page = doc[pno]
-            for idx, img in enumerate(page.get_images(full=True)):
+            page_images = doc[pno].get_images(full=True)
+            for img in page_images:
                 xref = img[0]
-                pix = fitz.Pixmap(doc, xref)
-                ext = ".png" if not pix.alpha and pix.colorspace.n == 3 else ".png"
-                name = f"image_{uuid.uuid4().hex[:7]}{ext}"
-                out = output_dir / name
-                if pix.n >= 5:  # CMYK
-                    pix = fitz.Pixmap(fitz.csRGB, pix)
-                pix.save(out)
-                extracted.append(out)
-                mapping[f"p{pno+1}_{xref}"] = name
+                
+                if xref in processed_xrefs:
+                    continue
+                
+                processed_xrefs.add(xref)
+                
+                try:
+                    pix = fitz.Pixmap(doc, xref)
+                    name = f"image_{uuid.uuid4().hex[:7]}.png"
+                    out = output_dir / name
+                    
+                    if pix.n >= 5:  # CMYK
+                        pix = fitz.Pixmap(fitz.csRGB, pix)
+                    
+                    pix.save(out)
+                    extracted.append(out)
+                    mapping[xref] = name
+                    
+                    logger.success(f"Saved: {name}")
+                    pix = None
+                    
+                except Exception as e:
+                    logger.warning(f"Error processing image: {e}")
+                    continue
+        
         doc.close()
-        logger.info(f"📷 PDF images extracted: {len(extracted)}")
+        logger.info(f"Extracted {len(extracted)} unique images")
         return extracted, mapping
 
     @staticmethod
-    def extract_text_from_pdf(pdf_path: Path) -> str:
-        # Try PyMuPDF first (better text layout), then PyPDF2.
-        try:
-            import fitz
-            with fitz.open(pdf_path) as doc:
-                text = []
-                for p in doc:
-                    text.append(p.get_text())
-                return "\n\n".join(ODTProcessor.clean_text(t) for t in text if t)
-        except Exception:
-            pass
+    def pdf_to_markdown_with_placeholders(pdf_path: Path, image_mapping: Dict[int, str]) -> str:
+        """Convert PDF to markdown with image placeholders at correct positions"""
+        doc = fitz.open(pdf_path)
+        result = []
+        
+        for pno in range(len(doc)):
+            page = doc[pno]
+            
+            # Get text blocks with position info
+            blocks = page.get_text("dict")
+            page_images = page.get_images(full=True)
+            
+            # Create list of content items with their positions
+            content_items = []
+            
+            # Add text blocks
+            for block in blocks["blocks"]:
+                if "lines" in block:  # Text block
+                    text_content = ""
+                    for line in block["lines"]:
+                        for span in line["spans"]:
+                            text_content += span["text"]
+                        text_content += " "
+                    
+                    if text_content.strip():
+                        content_items.append({
+                            "type": "text",
+                            "content": text_content.strip(),
+                            "y0": block["bbox"][1],  # Top Y coordinate
+                            "y1": block["bbox"][3]   # Bottom Y coordinate
+                        })
+            
+            # Add image placeholders
+            for img in page_images:
+                xref = img[0]
+                if xref in image_mapping:
+                    # Get image position
+                    img_instances = page.get_image_rects(xref)
+                    for rect in img_instances:
+                        placeholder = f"{{{{IMG_PLACEHOLDER_{xref}}}}}"
+                        content_items.append({
+                            "type": "image",
+                            "content": placeholder,
+                            "y0": rect.y0,
+                            "y1": rect.y1,
+                            "xref": xref
+                        })
+            
+            # Sort content by vertical position (top to bottom)
+            content_items.sort(key=lambda x: x["y0"])
+            
+            # Build page content
+            for item in content_items:
+                if item["type"] == "text":
+                    clean_text = ImprovedPDFProcessor.clean_text(item["content"])
+                    if clean_text:
+                        result.append(clean_text + "\n\n")
+                elif item["type"] == "image":
+                    result.append(item["content"] + "\n\n")
+        
+        doc.close()
+        
+        # Join and clean up
+        text = "".join(result)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        
+        return text.strip()
+    
+    @staticmethod
+    def replace_placeholders_with_links(markdown_text: str, image_mapping: Dict[int, str], 
+                                      drive_links: Dict[str, str]) -> str:
+        """Replace image placeholders with actual Drive links"""
+        
+        def replace_placeholder(match):
+            xref = int(match.group(1))
+            if xref in image_mapping:
+                filename = image_mapping[xref]
+                drive_link = ImprovedPDFProcessor._direct_link_for(drive_links, filename)
+                if drive_link:
+                    return f"![{filename}]({drive_link})"
+                else:
+                    return f"[Image: {filename}]"
+            return match.group(0)  # Keep original if no mapping found
+        
+        # Replace all placeholders
+        result = re.sub(r'\{\{IMG_PLACEHOLDER_(\d+)\}\}', replace_placeholder, markdown_text)
+        
+        return result
+    
+    @staticmethod
+    def _direct_link_for(drive_links: dict, filename: str) -> str | None:
+        """Convert Google Drive sharing link to direct view link"""
+        url = drive_links.get(filename)
+        if not url:
+            return None
 
-        try:
-            import PyPDF2
-            text = []
-            with open(pdf_path, "rb") as f:
-                r = PyPDF2.PdfReader(f)
-                for page in r.pages:
-                    text.append(page.extract_text() or "")
-            return "\n\n".join(ODTProcessor.clean_text(t) for t in text if t)
-        except Exception as e:
-            raise RuntimeError(f"PDF text extraction failed: {e}")
-
+        if "drive.google.com" in url and "/uc?" not in url:
+            try:
+                file_id = url.split("/d/")[1].split("/")[0]
+                return f"https://drive.google.com/uc?export=view&id={file_id}"
+            except Exception:
+                return url
+        return url
+    
+    @staticmethod
+    def clean_text(text: str) -> str:
+        """Clean and normalize text content"""
+        if not text:
+            return ""
+        
+        text = re.sub(r"\s+", " ", text.strip())
+        text = text.replace("\n", " ").replace("\r", " ")
+        
+        return text
+    
     @staticmethod
     def extract_text_with_links(pdf_path: Path, image_mapping: dict, drive_links: dict) -> str:
-        """Simple heuristic: put page text, then any images found on that page (if PyMuPDF available)."""
-        try:
-            import fitz
-            def _link(name: str) -> str | None:
-                direct = _direct_link_for(drive_links, name)
-                return f"![{name}]({direct})" if direct else None
+        """Main method: extract text with properly positioned images"""
+        
+        # Step 1: Convert PDF to markdown with placeholders
+        markdown_with_placeholders = ImprovedPDFProcessor.pdf_to_markdown_with_placeholders(
+            pdf_path, image_mapping
+        )
+        
+        logger.info(f"Generated markdown with placeholders: {len(markdown_with_placeholders)} chars")
+        
+        # Step 2: Replace placeholders with actual Drive links
+        final_markdown = ImprovedPDFProcessor.replace_placeholders_with_links(
+            markdown_with_placeholders, image_mapping, drive_links
+        )
+        
+        logger.info(f"Final markdown with Drive links: {len(final_markdown)} chars")
+        
+        return final_markdown
+    
 
-            out = []
-            with fitz.open(pdf_path) as doc:
-                for pno, page in enumerate(doc, start=1):
-                    out.append(f"# Page {pno}\n\n")
-                    out.append(ODTProcessor.clean_text(page.get_text() or "") + "\n\n")
-                    imgs = page.get_images(full=True)
-                    for idx, img in enumerate(imgs):
-                        key = f"p{pno}_{img[0]}"
-                        fname = image_mapping.get(key)
-                        if fname:
-                            md = _link(fname)
-                            if md:
-                                out.append(md + "\n\n")
-            return "".join(out)
-        except Exception:
-            # Fallback: just text
-            return PDFProcessor.extract_text_from_pdf(pdf_path)
-
-
-# -------- DOCX --------
 class DOCXProcessor:
-    """Extract text & images from .docx; uses python-docx."""
+    """Extract text & images from .docx with proper placeholder system."""
     
     @staticmethod
     def extract_images_from_docx(docx_path: Path, output_dir: Path) -> Tuple[List[Path], Dict[str, str]]:
+        """Extract images from DOCX file"""
         output_dir.mkdir(exist_ok=True)
         extracted, mapping = [], {}
+        
         with zipfile.ZipFile(docx_path) as z:
             candidates = [n for n in z.namelist() if n.startswith("word/media/")]
-            for n in candidates:
-                ext = Path(n).suffix.lower()
-                if ext:
-                    data = z.read(n)
+            for img_path in candidates:
+                ext = Path(img_path).suffix.lower()
+                if ext in IMAGE_EXTS:
+                    data = z.read(img_path)
                     new_name = f"docx_{uuid.uuid4().hex[:6]}{ext}"
-                    out = output_dir / new_name
-                    out.write_bytes(data)
-                    extracted.append(out)
-                    mapping[n] = new_name
+                    out_path = output_dir / new_name
+                    out_path.write_bytes(data)
+                    extracted.append(out_path)
+                    mapping[img_path] = new_name
+        
         logger.info(f"📷 DOCX images extracted: {len(extracted)}")
         return extracted, mapping
 
     @staticmethod
-    def extract_text_from_docx(docx_path: Path) -> str:
+    def get_relationship_mapping(docx_path: Path) -> Dict[str, str]:
+        """Get mapping of relationship IDs to image targets"""
+        rel_mapping = {}
+        
+        try:
+            with zipfile.ZipFile(docx_path) as z:
+                rels_path = 'word/_rels/document.xml.rels'
+                if rels_path in z.namelist():
+                    content = z.read(rels_path)
+                    root = ET.fromstring(content)
+                    ns = {'r': 'http://schemas.openxmlformats.org/package/2006/relationships'}
+                    
+                    for rel in root.findall('r:Relationship', ns):
+                        rel_id = rel.get('Id')
+                        target = rel.get('Target')
+                        if rel_id and target:
+                            if target.startswith('media/'):
+                                target = f"word/{target}"
+                            elif not target.startswith('word/'):
+                                target = f"word/{target}"
+                            rel_mapping[rel_id] = target
+        except Exception as e:
+            logger.warning(f"Could not parse relationships: {e}")
+        
+        return rel_mapping
+
+    @staticmethod
+    def docx_to_markdown_with_placeholders(docx_path: Path, image_mapping: dict) -> str:
+        """Convert DOCX to markdown with image placeholders"""
         try:
             from docx import Document
         except ImportError:
             raise RuntimeError("python-docx not installed. `pip install python-docx`")
 
         doc = Document(docx_path)
-        lines: List[str] = []
-
-        # Headings & paragraphs
-        for p in doc.paragraphs:
-            txt = ODTProcessor.clean_text(p.text)
-            if not txt:
+        content_parts = []
+        rel_mapping = DOCXProcessor.get_relationship_mapping(docx_path)
+        
+        def clean_text(text):
+            """Clean text without corrupting words"""
+            if not text:
+                return ""
+            return ' '.join(text.split()).strip()
+        
+        image_counter = 0
+        image_placeholders = {}  # Track which image goes to which placeholder
+        
+        for paragraph in doc.paragraphs:
+            paragraph_text = []
+            has_content = False
+            
+            for run in paragraph.runs:
+                # Add text content
+                if run.text and run.text.strip():
+                    clean_run_text = clean_text(run.text)
+                    if clean_run_text:
+                        paragraph_text.append(clean_run_text)
+                        has_content = True
+                
+                # Check for images in run
+                if hasattr(run, '_r') and run._r is not None:
+                    # Look for blip elements (images)
+                    blip = run._r.find('.//{*}blip')
+                    if blip is not None:
+                        embed_id = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                        if embed_id and embed_id in rel_mapping:
+                            image_path = rel_mapping[embed_id]
+                            if image_path in image_mapping:
+                                # Create placeholder
+                                placeholder = f"{{{{DOCX_IMG_{image_counter}}}}}"
+                                paragraph_text.append(placeholder)
+                                image_placeholders[image_counter] = image_mapping[image_path]
+                                image_counter += 1
+                                has_content = True
+            
+            if not has_content:
                 continue
-            if p.style and str(p.style.name).lower().startswith("heading"):
-                # Try to parse heading level; defaults to 1
+            
+            full_text = " ".join(paragraph_text)
+            
+            # Handle headings
+            if paragraph.style and str(paragraph.style.name).lower().startswith("heading"):
                 level = 1
                 for n in range(1, 7):
-                    if f"heading {n}" in str(p.style.name).lower():
+                    if f"heading {n}" in str(paragraph.style.name).lower():
                         level = n
                         break
-                lines.append("#" * level + " " + txt + "\n\n")
+                content_parts.append("#" * level + " " + full_text + "\n\n")
             else:
-                lines.append(txt + "\n\n")
-
-        # Tables → markdown
-        for t in doc.tables:
+                content_parts.append(full_text + "\n\n")
+        
+        # Process tables
+        for table in doc.tables:
             rows = []
-            for r in t.rows:
-                rows.append([ODTProcessor.clean_text(c.text) or " " for c in r.cells])
+            for row in table.rows:
+                row_data = [clean_text(cell.text) or " " for cell in row.cells]
+                if any(cell.strip() for cell in row_data):
+                    rows.append(row_data)
+            
             if rows:
-                lines.append("| " + " | ".join(rows[0]) + " |\n")
-                lines.append("| " + " | ".join(["---"] * len(rows[0])) + " |\n")
-                for r in rows[1:]:
-                    while len(r) < len(rows[0]):
-                        r.append(" ")
-                    lines.append("| " + " | ".join(r[:len(rows[0])]) + " |\n")
-                lines.append("\n")
+                content_parts.append("| " + " | ".join(rows[0]) + " |\n")
+                content_parts.append("| " + " | ".join(["---"] * len(rows[0])) + " |\n")
+                for row in rows[1:]:
+                    while len(row) < len(rows[0]):
+                        row.append(" ")
+                    content_parts.append("| " + " | ".join(row) + " |\n")
+                content_parts.append("\n")
+        
+        markdown_text = "".join(content_parts)
+        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
+        markdown_text = re.sub(r'[ \t]+\n', '\n', markdown_text)
+        
+        return markdown_text.strip(), image_placeholders
 
-        return "".join(lines)
+    @staticmethod
+    def replace_placeholders_with_links(markdown_text: str, image_placeholders: dict, drive_links: dict) -> str:
+        """Replace image placeholders with actual Drive links"""
+        
+        def replace_placeholder(match):
+            placeholder_id = int(match.group(1))
+            if placeholder_id in image_placeholders:
+                filename = image_placeholders[placeholder_id]
+                drive_link = _direct_link_for(drive_links, filename)
+                if drive_link:
+                    return f"![{filename}]({drive_link})"
+            return "[Image]"
+        
+        result = re.sub(r'\{\{DOCX_IMG_(\d+)\}\}', replace_placeholder, markdown_text)
+        return result
 
     @staticmethod
     def extract_text_with_links(docx_path: Path, image_mapping: dict, drive_links: dict) -> str:
-        """
-        Best-effort: get normal text; append an 'Images' section with embedded Drive links
-        (inline placement inside paragraphs requires deeper XML parsing).
-        """
-        text = DOCXProcessor.extract_text_from_docx(docx_path)
-        if not image_mapping:
-            return text
-        parts = [text, "## Images\n\n"]
-        for _, mapped in image_mapping.items():
-            link = _direct_link_for(drive_links, mapped)
-            if link:
-                parts.append(f"![{mapped}]({link})\n\n")
-        return "".join(parts)
+        """Main method: extract text with properly positioned images"""
+        
+        # Step 1: Convert DOCX to markdown with placeholders
+        markdown_with_placeholders, image_placeholders = DOCXProcessor.docx_to_markdown_with_placeholders(
+            docx_path, image_mapping
+        )
+        
+        logger.info(f"Generated markdown with {len(image_placeholders)} image placeholders")
+        
+        # Step 2: Replace placeholders with actual Drive links
+        final_markdown = DOCXProcessor.replace_placeholders_with_links(
+            markdown_with_placeholders, image_placeholders, drive_links
+        )
+        
+        logger.info(f"Final markdown with Drive links: {len(final_markdown)} chars")
+        
+        return final_markdown
+
+    @staticmethod
+    def extract_text_from_docx(docx_path: Path) -> str:
+        """Basic text extraction without image links"""
+        markdown_text, _ = DOCXProcessor.docx_to_markdown_with_placeholders(docx_path, {})
+        return markdown_text
 
 
 # -------- Dispatcher --------
@@ -608,6 +810,7 @@ def process_any(path: Path, output_dir: Path, drive_links: dict | None = None,
         
         md = (ODTProcessor.extract_text_with_links(path, mapping, drive_links)
               if drive_links else ODTProcessor.extract_text_from_odt(path))
+        logger.success(f"MARKDOWN: {md}")
         return {"markdown": md, "images": imgs, "image_mapping": mapping}
 
     if ext == ".pdf":
@@ -616,11 +819,14 @@ def process_any(path: Path, output_dir: Path, drive_links: dict | None = None,
                    if (output_dir / fname).exists()]
             mapping = existing_image_mapping
         else:
-            imgs, mapping = PDFProcessor.extract_images_from_pdf(path, output_dir)
+            imgs, mapping = ImprovedPDFProcessor.extract_images_from_pdf(path, output_dir)
         
-        md = (PDFProcessor.extract_text_with_links(path, mapping, drive_links)
-              if drive_links else PDFProcessor.extract_text_from_pdf(path))
+        md = (ImprovedPDFProcessor.extract_text_with_links(path, mapping, drive_links)
+              if drive_links else ImprovedPDFProcessor.pdf_to_markdown_with_placeholders(path, mapping))
+        
+        logger.success(f"MARKDOWN: {md}")
         return {"markdown": md, "images": imgs, "image_mapping": mapping}
+    
 
     if ext == ".docx":
         if existing_image_mapping:
@@ -632,6 +838,7 @@ def process_any(path: Path, output_dir: Path, drive_links: dict | None = None,
         
         md = (DOCXProcessor.extract_text_with_links(path, mapping, drive_links)
               if drive_links else DOCXProcessor.extract_text_from_docx(path))
+        logger.success(f"MARKDOWN: {md}")
         return {"markdown": md, "images": imgs, "image_mapping": mapping}
 
     raise ValueError(f"Unsupported extension: {ext}")
