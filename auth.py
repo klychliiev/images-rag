@@ -68,17 +68,45 @@ def auth_sidebar() -> bool:
     tab_login, tab_signup = st.sidebar.tabs(["Sign in", "Create account"])
 
     with tab_login:
-        with st.form("login_form"):
-            email = st.text_input("Work email", placeholder="you@artisio.co", key="login_email")
-            password = st.text_input("Password", type="password", key="login_pw")
-            submitted = st.form_submit_button("Sign in", use_container_width=True)
-            if submitted:
-                _, err = sign_in(email, password)
-                if err:
-                    st.error(err)
-                else:
-                    st.success("Signed in!")
-                    st.rerun()
+        email = st.text_input("Work email", placeholder="you@artisio.co", key="login_email")
+        password = st.text_input("Password", type="password", key="login_pw")
+
+        col1, col2 = st.columns(2)
+
+        login_clicked = False
+        reset_clicked = False
+        reset_error = None
+
+        with col1:
+            if st.button("Sign in", use_container_width=True):
+                login_clicked = True
+
+        with col2:
+            if st.button("Forgot password?", use_container_width=True):
+                reset_clicked = True
+
+        # ---- HANDLE ACTIONS OUTSIDE COLUMNS ----
+
+        if login_clicked:
+            _, err = sign_in(email, password)
+            if err:
+                st.error(err)
+            else:
+                st.success("Signed in!")
+                st.rerun()
+
+        if reset_clicked:
+            if not email:
+                st.warning("Enter your email first.")
+            else:
+                try:
+                    _get_client().auth.reset_password_email(
+                        email,
+                        {"redirect_to": "http://localhost:8501"}
+                    )
+                    st.success("📧 Reset email sent.")
+                except Exception as e:
+                    st.error(str(e))
 
     with tab_signup:
         with st.form("signup_form"):
