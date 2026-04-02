@@ -12,6 +12,44 @@ from pinecone_service import PineconeDocumentIndexer
 
 from auth import auth_sidebar, _get_client
 
+st.set_page_config(
+    page_title="Document Processor",
+    page_icon="📄",
+    layout="centered"
+)
+
+st.markdown("""
+<style>
+/* Light base */
+html, body, .stApp {
+    background-color: #ffffff !important;
+}
+
+[data-testid="stAppViewContainer"] {
+    background-color: #ffffff !important;
+}
+
+[data-testid="stSidebar"] {
+    background-color: #f0f2f6 !important;
+}
+
+/* Text contrast on light bg */
+h1, h2, h3, h4, h5, h6, p, span, label {
+    color: #1a1a2e !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+/* Primary button stays on-brand */
+button[kind="primary"] {
+    background-color: #10cafb !important;
+    color: #1a1a2e !important;
+    border: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 def handle_password_recovery():
     """Detect Supabase recovery redirect via URL params."""
@@ -22,8 +60,6 @@ def handle_password_recovery():
 
 def password_reset_view():
     """UI for setting a new password after email link."""
-    st.set_page_config(page_title="Reset Password", page_icon="🔐")
-
     st.title("🔐 Reset your password")
 
     new_password = st.text_input("New password", type="password")
@@ -50,11 +86,6 @@ def password_reset_view():
         except Exception as e:
             st.error(str(e))
 
-
-# Must run BEFORE UI renders
-st.set_page_config(
-    page_title="Docs → Markdown & Pinecone", page_icon="📄", layout="centered"
-)
 
 handle_password_recovery()
 
