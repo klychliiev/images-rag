@@ -102,7 +102,7 @@ def auth_sidebar() -> bool:
                 try:
                     _get_client().auth.reset_password_email(
                         email,
-                        {"redirect_to": "http://localhost:8501"}
+                        {"redirect_to": "https://pinecone-manager-service.streamlit.app"}
                     )
                     st.success("📧 Reset email sent.")
                 except Exception as e:
