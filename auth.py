@@ -2,11 +2,17 @@ import os
 from typing import Optional, Tuple
 import streamlit as st
 from supabase import create_client, Client
+from streamlit_cookies_controller import CookieController
 
 from config import settings
 
+_COOKIE_ACCESS = "sb_access_token"
+_COOKIE_REFRESH = "sb_refresh_token"
+_COOKIE_MAX_AGE_ACCESS = 60 * 60 * 24 * 7   # 7 days
+_COOKIE_MAX_AGE_REFRESH = 60 * 60 * 24 * 30  # 30 days
+
+
 def _get_client() -> Client:
-    """Singleton-ish Supabase client kept in session_state."""
     if "supabase" not in st.session_state:
         url = settings.supabase_url
         key = settings.supabase_anon_key
@@ -15,32 +21,71 @@ def _get_client() -> Client:
         st.session_state.supabase = create_client(url, key)
     return st.session_state.supabase
 
+
+def _cookies() -> CookieController:
+    if "cookie_ctrl" not in st.session_state:
+        st.session_state.cookie_ctrl = CookieController()
+    return st.session_state.cookie_ctrl
+
+
 def _is_allowed_email(email: str) -> bool:
     return email.lower().endswith(settings.acceptable_email_domain)
 
+
 def current_user():
-    """Return the cached user (if any)."""
     return st.session_state.get("user")
+
+
+def _save_tokens(session) -> None:
+    ctrl = _cookies()
+    ctrl.set(_COOKIE_ACCESS, session.access_token, max_age=_COOKIE_MAX_AGE_ACCESS)
+    ctrl.set(_COOKIE_REFRESH, session.refresh_token, max_age=_COOKIE_MAX_AGE_REFRESH)
+
+
+def _clear_tokens() -> None:
+    ctrl = _cookies()
+    ctrl.remove(_COOKIE_ACCESS)
+    ctrl.remove(_COOKIE_REFRESH)
+
+
+def _restore_session_from_cookies() -> None:
+    if st.session_state.get("user"):
+        return
+    ctrl = _cookies()
+    access_token = ctrl.get(_COOKIE_ACCESS)
+    refresh_token = ctrl.get(_COOKIE_REFRESH)
+    if not access_token or not refresh_token:
+        return
+    try:
+        res = _get_client().auth.set_session(access_token, refresh_token)
+        st.session_state.user = res.user
+        st.session_state.session = res.session
+        _save_tokens(res.session)
+    except Exception:
+        _clear_tokens()
+
 
 def sign_out():
     _get_client().auth.sign_out()
+    _clear_tokens()
     for k in ("user", "session"):
         st.session_state.pop(k, None)
 
+
 def sign_in(email: str, password: str) -> Tuple[Optional[dict], Optional[str]]:
-    """Email/password sign in. Returns (user_dict, error_msg)."""
     if not _is_allowed_email(email):
         return None, f"Only {settings.acceptable_email_domain} emails are allowed."
     try:
         res = _get_client().auth.sign_in_with_password({"email": email, "password": password})
         st.session_state.user = res.user
         st.session_state.session = res.session
+        _save_tokens(res.session)
         return res.user, None
     except Exception as e:
         return None, str(e)
 
+
 def sign_up(email: str, password: str) -> Optional[str]:
-    """Create a new account (Supabase will send verification email if configured)."""
     if not _is_allowed_email(email):
         return f"Only {settings.acceptable_email_domain} emails are allowed."
     try:
@@ -51,10 +96,8 @@ def sign_up(email: str, password: str) -> Optional[str]:
 
 
 def auth_sidebar() -> bool:
-    """
-    Renders the account box in the sidebar.
-    Returns True if the user is authenticated.
-    """
+    _restore_session_from_cookies()
+
     st.sidebar.header("🔐 Account")
 
     user = current_user()
@@ -75,7 +118,6 @@ def auth_sidebar() -> bool:
 
         login_clicked = False
         reset_clicked = False
-        reset_error = None
 
         with col1:
             if st.button("Sign in", use_container_width=True):
@@ -84,8 +126,6 @@ def auth_sidebar() -> bool:
         with col2:
             if st.button("Forgot password?", use_container_width=True):
                 reset_clicked = True
-
-        # ---- HANDLE ACTIONS OUTSIDE COLUMNS ----
 
         if login_clicked:
             _, err = sign_in(email, password)

@@ -841,4 +841,41 @@ def process_any(path: Path, output_dir: Path, drive_links: dict | None = None,
         logger.success(f"MARKDOWN: {md}")
         return {"markdown": md, "images": imgs, "image_mapping": mapping}
 
+    if ext == ".md":
+        return MarkdownProcessor.process_md(path, path.parent / "images", drive_links or {})
+
     raise ValueError(f"Unsupported extension: {ext}")
+
+
+class MarkdownProcessor:
+    @staticmethod
+    def process_md(
+        md_path: Path,
+        images_dir: Path | None = None,
+        drive_links: dict | None = None,
+    ) -> dict:
+        content = md_path.read_text(encoding="utf-8")
+        img_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+
+        images: list[Path] = []
+        image_mapping: dict[str, str] = {}
+        seen: set[Path] = set()
+
+        if images_dir and images_dir.exists():
+            for match in img_pattern.finditer(content):
+                ref = match.group(2)
+                img_path = (images_dir / Path(ref).name).resolve()
+                if img_path.exists() and img_path not in seen:
+                    seen.add(img_path)
+                    images.append(img_path)
+                    image_mapping[ref] = img_path.name
+
+        markdown = content
+        if drive_links:
+            def _replace(m: re.Match) -> str:
+                alt, ref = m.group(1), m.group(2)
+                url = drive_links.get(Path(ref).name)
+                return f"![{alt}]({url})" if url else m.group(0)
+            markdown = img_pattern.sub(_replace, content)
+
+        return {"markdown": markdown, "images": images, "image_mapping": image_mapping}

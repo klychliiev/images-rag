@@ -33,3 +33,5 @@ PyPDF2
 python-docx
 PyMuPDF
 supabase
+requests
+streamlit-cookies-controller

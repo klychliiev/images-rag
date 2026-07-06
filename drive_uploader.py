@@ -1,6 +1,7 @@
 import mimetypes
 from pathlib import Path
 import json
+import requests as _http
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -10,47 +11,65 @@ from googleapiclient.errors import HttpError
 from config import settings
 from loguru import logger
 
-def get_service():
-    """Get authenticated Google Drive service"""
-    try:
-        creds = None
+
+_cached_creds: Credentials | None = None
+
+
+def _get_creds() -> Credentials:
+    """Return valid Google credentials, refreshing only when expired."""
+    global _cached_creds
+
+    if _cached_creds and _cached_creds.valid:
+        return _cached_creds
+
+    if _cached_creds is None:
         token_json = settings.google_token_json
-        
-        if isinstance(token_json, str):
-            token_info = json.loads(token_json)
+        token_info = token_json if isinstance(token_json, dict) else json.loads(token_json)
+        _cached_creds = Credentials.from_authorized_user_info(token_info, [settings.google_cloud_scopes])
+
+    if not _cached_creds.valid:
+        if _cached_creds.expired and _cached_creds.refresh_token:
+            logger.info("Refreshing expired Google credentials...")
+            _cached_creds.refresh(Request())
+            logger.info("Credentials refreshed successfully")
         else:
-            token_info = token_json
-            
-        creds = Credentials.from_authorized_user_info(token_info, [settings.google_cloud_scopes])
-        
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                logger.info("Refreshing expired Google credentials...")
-                creds.refresh(Request())
-                settings.google_token_json = creds.to_json()
-                logger.info("Credentials refreshed successfully")
-            else:
-                logger.info("Starting OAuth flow for new credentials...")
-                client_config = {
-                    "installed": {
-                        "client_id": settings.google_client_id,
-                        "client_secret": settings.google_client_secret,
-                        "redirect_uris": settings.google_redirect_uris,
-                        "auth_uri": settings.google_auth_uri,
-                        "token_uri": settings.google_token_uri,
-                    }
+            logger.info("Starting OAuth flow for new credentials...")
+            client_config = {
+                "installed": {
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
+                    "redirect_uris": settings.google_redirect_uris,
+                    "auth_uri": settings.google_auth_uri,
+                    "token_uri": settings.google_token_uri,
                 }
-                flow = InstalledAppFlow.from_client_config(client_config, [settings.google_cloud_scopes])
-                creds = flow.run_local_server(port=0)
-                logger.info("OAuth flow completed successfully")
-        
-        service = build("drive", "v3", credentials=creds)
+            }
+            flow = InstalledAppFlow.from_client_config(client_config, [settings.google_cloud_scopes])
+            _cached_creds = flow.run_local_server(port=0)
+            logger.info("OAuth flow completed successfully")
+
+    return _cached_creds
+
+
+def get_service():
+    """Get authenticated Google Drive service."""
+    try:
+        service = build("drive", "v3", credentials=_get_creds())
         logger.info("Google Drive service initialized successfully")
         return service
-        
     except Exception as e:
         logger.error(f"Failed to initialize Google Drive service: {e}")
         raise
+
+
+def get_thumbnail_bytes(thumbnail_url: str) -> bytes | None:
+    """Fetch thumbnail bytes server-side using Drive auth (thumbnailLinks require a Bearer token)."""
+    try:
+        token = _get_creds().token
+        resp = _http.get(thumbnail_url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        return resp.content if resp.ok else None
+    except Exception as e:
+        logger.warning(f"Failed to fetch thumbnail: {e}")
+        return None
 
 def ensure_folder(service, folder_name: str) -> str:
     """Find or create a folder by name in My Drive (root)."""
@@ -181,6 +200,146 @@ def upload_images_to_folder(image_paths: list[Path], folder_name: str) -> dict[s
     except Exception as e:
         logger.error(f"Failed to upload images to Drive: {e}")
         raise
+
+def list_files_in_folder(folder_name: str) -> list[dict]:
+    """List all files in a Drive folder. Returns id, name, thumbnailLink, webViewLink, mimeType, modifiedTime."""
+    service = get_service()
+    folder_id = ensure_folder(service, folder_name)
+
+    results = (
+        service.files()
+        .list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="files(id,name,thumbnailLink,webViewLink,mimeType,modifiedTime)",
+            orderBy="name",
+            pageSize=100,
+        )
+        .execute()
+    )
+    return results.get("files", [])
+
+
+def replace_file(file_id: str, new_file_path: Path) -> str:
+    """Replace file content in-place keeping the same file ID (and therefore the same URL)."""
+    service = get_service()
+    mime, _ = mimetypes.guess_type(str(new_file_path))
+    mime = mime or "application/octet-stream"
+
+    media = MediaFileUpload(str(new_file_path), mimetype=mime, resumable=True)
+    updated = (
+        service.files()
+        .update(fileId=file_id, media_body=media, fields="id,webViewLink")
+        .execute()
+    )
+    web_view_link = updated.get("webViewLink", "")
+    return to_direct_view_link(web_view_link) if web_view_link else ""
+
+
+def delete_file(file_id: str) -> None:
+    """Permanently delete a file from Drive."""
+    service = get_service()
+    service.files().delete(fileId=file_id).execute()
+
+
+def _ensure_subfolder(service, parent_id: str, name: str) -> str:
+    """Find or create a subfolder inside a given parent folder by ID."""
+    safe = name.replace("'", "\\'")
+    q = (
+        f"mimeType='application/vnd.google-apps.folder' "
+        f"and name='{safe}' "
+        f"and '{parent_id}' in parents "
+        f"and trashed=false"
+    )
+    resp = service.files().list(q=q, spaces="drive", fields="files(id)", pageSize=5).execute()
+    files = resp.get("files", [])
+    if files:
+        return files[0]["id"]
+    meta = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    return service.files().create(body=meta, fields="id").execute()["id"]
+
+
+def upload_guide_images(images: list[Path], parent_folder_name: str, guide_name: str) -> dict[str, str]:
+    """Upload images into parent_folder/guide_name/ subfolder. Returns {filename: direct_url}."""
+    if not images:
+        return {}
+    service = get_service()
+    parent_id = ensure_folder(service, parent_folder_name)
+    guide_folder_id = _ensure_subfolder(service, parent_id, guide_name)
+
+    out: dict[str, str] = {}
+    for p in images:
+        if not p.exists():
+            logger.warning(f"Image not found, skipping: {p}")
+            continue
+        mime, _ = mimetypes.guess_type(str(p))
+        mime = mime or "application/octet-stream"
+
+        # Replace existing file if present
+        existing = service.files().list(
+            q=f"name='{p.name}' and '{guide_folder_id}' in parents and trashed=false",
+            fields="files(id)",
+            pageSize=1,
+        ).execute().get("files", [])
+
+        media = MediaFileUpload(str(p), mimetype=mime, resumable=True)
+        if existing:
+            f = service.files().update(
+                fileId=existing[0]["id"], media_body=media, fields="id,webViewLink"
+            ).execute()
+        else:
+            meta = {"name": p.name, "parents": [guide_folder_id]}
+            f = service.files().create(body=meta, media_body=media, fields="id,webViewLink").execute()
+
+        file_id = f["id"]
+        set_public(service, file_id)
+        out[p.name] = to_direct_view_link(f.get("webViewLink", ""))
+        logger.success(f"Uploaded {p.name} → guide '{guide_name}'")
+
+    return out
+
+
+def list_guides(parent_folder_name: str) -> list[dict]:
+    """
+    List guide subfolders inside the parent folder.
+    Returns [{id, name, modifiedTime, files: [{id, name, thumbnailLink, modifiedTime}]}].
+    """
+    service = get_service()
+    parent_id = ensure_folder(service, parent_folder_name)
+
+    q = f"mimeType='application/vnd.google-apps.folder' and '{parent_id}' in parents and trashed=false"
+    folders = service.files().list(
+        q=q,
+        fields="files(id,name,modifiedTime)",
+        orderBy="name",
+        pageSize=100,
+    ).execute().get("files", [])
+
+    guides = []
+    for folder in folders:
+        files_resp = service.files().list(
+            q=f"'{folder['id']}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
+            fields="files(id,name,thumbnailLink,modifiedTime)",
+            pageSize=200,
+        ).execute()
+        guides.append({
+            "id": folder["id"],
+            "name": folder["name"],
+            "modifiedTime": folder.get("modifiedTime", ""),
+            "files": files_resp.get("files", []),
+        })
+    return guides
+
+
+def delete_guide_folder(folder_id: str) -> None:
+    """Permanently delete a guide folder and all its contents."""
+    service = get_service()
+    service.files().delete(fileId=folder_id).execute()
+    logger.info(f"Deleted guide folder {folder_id}")
+
 
 def test_drive_connection():
     """Test function to verify Drive API connectivity"""

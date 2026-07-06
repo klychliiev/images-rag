@@ -1,13 +1,19 @@
+import re
 import tempfile
-from datetime import datetime
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
 import streamlit as st
 
 from config import settings
-from processor import process_any
-from drive_uploader import upload_images_to_folder
+from processor import process_any, MarkdownProcessor
+from drive_uploader import (
+    upload_images_to_folder, upload_guide_images,
+    list_guides, delete_guide_folder,
+    get_thumbnail_bytes,
+)
 from pinecone_service import PineconeDocumentIndexer
 
 from auth import auth_sidebar, _get_client
@@ -50,6 +56,27 @@ button[kind="primary"] {
 }
 </style>
 """, unsafe_allow_html=True)
+
+def _large_thumb_url(url: str) -> str:
+    return re.sub(r'=s\d+', '=s1600', url)
+
+
+@st.dialog("Image preview", width="large")
+def _image_preview_dialog() -> None:
+    info = st.session_state.get("_preview_file")
+    if not info:
+        return
+    st.caption(f"**{info['name']}**")
+    cache_key = f"_preview_bytes_{info['id']}"
+    if cache_key not in st.session_state:
+        with st.spinner("Loading..."):
+            st.session_state[cache_key] = get_thumbnail_bytes(_large_thumb_url(info["thumbnail"]))
+    img_bytes = st.session_state[cache_key]
+    if img_bytes:
+        st.image(img_bytes, use_container_width=True)
+    else:
+        st.warning("Could not load preview.")
+
 
 def handle_password_recovery():
     """Detect Supabase recovery redirect via URL params."""
@@ -137,20 +164,6 @@ pinecone_index_name = st.sidebar.text_input(
     disabled=disabled,
 )
 
-files = st.file_uploader(
-    "Upload files",
-    type=["odt", "pdf", "docx"],
-    accept_multiple_files=True,
-    help="Supported formats: .odt, .pdf, .docx",
-    disabled=disabled,
-)
-
-st.info(
-    "📂 **Supported file formats:** ODT, PDF, DOCX. "
-    "Images embedded in documents will also be extracted automatically."
-)
-
-
 def make_indexer() -> PineconeDocumentIndexer:
     idx = PineconeDocumentIndexer(
         pinecone_api_key=settings.pinecone_api_key,
@@ -197,7 +210,7 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
         st.info("💾 Indexing document in Pinecone...")
         metadata = {
             "filename": upload.name,
-            "uploaded_at": datetime.utcnow().isoformat(),
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
             "content_ext": Path(upload.name).suffix.lower(),
             "images_uploaded": bool(drive_links),
             "images_count": len(images),
@@ -219,34 +232,184 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
         }
 
 
-go = st.button(
-    "🚀 Process", type="primary", use_container_width=True, disabled=disabled
-)
-
 if not is_authed:
     st.warning("You must sign in with your **@artisio.co** account to process files.")
     st.stop()
 
-if go:
-    if not files:
-        st.error("Please upload at least one file (.odt, .pdf, .docx).")
+
+def process_zip(upload, indexer: PineconeDocumentIndexer):
+    guide_name = Path(upload.name).stem
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        zip_path = tmpdir / upload.name
+        zip_path.write_bytes(upload.getvalue())
+
+        extract_dir = tmpdir / "extracted"
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(extract_dir)
+
+        md_files = list(extract_dir.rglob("*.md"))
+        if not md_files:
+            st.error("No .md file found in the ZIP.")
+            return None
+
+        md_path = md_files[0]
+        images_dir = md_path.parent / "images"
+
+        extracted = MarkdownProcessor.process_md(md_path, images_dir)
+        images: List[Path] = extracted["images"]
+
+        drive_links: Dict[str, str] = {}
+        if images:
+            st.info(f"📤 Uploading {len(images)} images to Drive → `{drive_folder}/{guide_name}/`")
+            with st.spinner("Uploading to Google Drive..."):
+                drive_links = upload_guide_images(images, drive_folder, guide_name)
+            st.success(f"✅ Uploaded {len(drive_links)} images")
+        else:
+            st.info("ℹ️ No images found in the ZIP.")
+
+        rebuilt = MarkdownProcessor.process_md(md_path, images_dir, drive_links)
+        markdown = rebuilt["markdown"]
+
+        st.info("💾 Indexing in Pinecone...")
+        metadata = {
+            "filename": upload.name,
+            "guide_name": guide_name,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            "images_count": len(images),
+        }
+
+        try:
+            stats = indexer.process_and_index(markdown, metadata)
+            st.success("✅ Guide indexed in Pinecone")
+        except Exception as e:
+            st.error(f"❌ Pinecone indexing failed: {e}")
+            stats = {"error": str(e)}
+
+        return {
+            "guide_name": guide_name,
+            "images": [p.name for p in images],
+            "drive_links": drive_links,
+            "stats": stats,
+        }
+
+
+tab1, tab2 = st.tabs(["📤 Upload Guides", "📚 Manage Guides"])
+
+with tab1:
+    files = st.file_uploader(
+        "Upload guides",
+        type=["zip", "odt", "pdf", "docx"],
+        accept_multiple_files=True,
+        help="ZIP (recommended): MD file + images/ folder. Legacy: .odt, .pdf, .docx",
+    )
+
+    st.info(
+        "📦 **ZIP (recommended):** Pack one guide as a ZIP containing the `.md` file and an `images/` folder.  \n"
+        "The ZIP filename becomes the guide name (e.g. `customers.zip` → guide `customers`).  \n"
+        "Re-uploading the same ZIP name replaces the existing guide."
+    )
+
+    go = st.button("🚀 Process", type="primary", use_container_width=True)
+
+    if go:
+        if not files:
+            st.error("Please upload at least one file.")
+        else:
+            idx = make_indexer()
+            progress = st.progress(0.0)
+
+            for i, f in enumerate(files, start=1):
+                with st.expander(f"📄 {f.name}", expanded=True):
+                    try:
+                        if f.name.lower().endswith(".zip"):
+                            res = process_zip(f, idx)
+                            if res:
+                                st.subheader(f"Images uploaded: {len(res['images'])}")
+                        else:
+                            res = process_one(f, idx)
+                            st.subheader(f"Images detected: {len(res['images'])}")
+                    except Exception as e:
+                        st.error(f"❌ {e}")
+                progress.progress(i / len(files))
+
+with tab2:
+    st.subheader(f"Guides in `{drive_folder}`")
+
+    if st.button("🔄 Refresh", key="refresh_guides"):
+        st.session_state.pop("guides", None)
+
+    if "guides" not in st.session_state:
+        with st.spinner("Loading guides from Google Drive..."):
+            try:
+                st.session_state["guides"] = list_guides(drive_folder)
+            except Exception as e:
+                st.error(f"❌ Could not load guides: {e}")
+                st.session_state["guides"] = []
+
+    guides = st.session_state.get("guides", [])
+
+    if not guides:
+        st.info("No guides found. Upload a ZIP in the Upload tab to get started.")
     else:
-        idx = make_indexer()
-        progress = st.progress(0.0)
+        st.write(f"**{len(guides)} guide(s)** in `{drive_folder}`")
 
-        for i, f in enumerate(files, start=1):
-            with st.expander(f"📄 {f.name}", expanded=True):
-                try:
-                    res = process_one(f, idx)
+        for guide in guides:
+            gid = guide["id"]
+            gname = guide["name"]
+            modified = guide.get("modifiedTime", "")[:10]
+            files = guide.get("files", [])
 
-                    left, right = st.columns([2, 1])
+            with st.expander(f"📚 {gname}  —  {len(files)} image(s)  —  last modified {modified}"):
+                if files:
+                    cols = st.columns(min(len(files), 4))
+                    for i, f in enumerate(files):
+                        thumb = f.get("thumbnailLink")
+                        with cols[i % 4]:
+                            if thumb:
+                                thumb_bytes = get_thumbnail_bytes(thumb)
+                                if thumb_bytes:
+                                    st.image(thumb_bytes, width=120, caption=f["name"])
+                                    if st.button("🔍", key=f"view_{f['id']}", help="View full size"):
+                                        st.session_state["_preview_file"] = {
+                                            "id": f["id"],
+                                            "name": f["name"],
+                                            "thumbnail": thumb,
+                                        }
+                                        _image_preview_dialog()
+                            else:
+                                st.caption(f["name"])
+                else:
+                    st.write("*(no images)*")
 
-                    st.subheader(f"Images detected: {len(res['images'])}")
-                    if res["drive_links"]:
-                        st.write("### Image links")
-                        st.json(res["drive_links"])
+                st.divider()
 
-                except Exception as e:
-                    st.error(f"❌ {e}")
-
-            progress.progress(i / len(files))
+                confirm_key = f"confirm_delete_guide_{gid}"
+                if st.session_state.get(confirm_key):
+                    st.warning(
+                        f"Delete **{gname}**? This permanently removes all Drive images "
+                        f"and Pinecone vectors for this guide."
+                    )
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("Yes, delete guide", key=f"yes_guide_{gid}", type="primary"):
+                            with st.spinner("Deleting..."):
+                                try:
+                                    delete_guide_folder(gid)
+                                    idx = make_indexer()
+                                    idx.delete_guide_vectors(gname)
+                                    st.success(f"🗑️ Guide '{gname}' deleted from Drive and Pinecone.")
+                                    st.session_state[confirm_key] = False
+                                    st.session_state.pop("guides", None)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Delete failed: {e}")
+                    with c2:
+                        if st.button("Cancel", key=f"cancel_guide_{gid}"):
+                            st.session_state[confirm_key] = False
+                            st.rerun()
+                else:
+                    if st.button("🗑️ Delete guide", key=f"delete_guide_{gid}"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
