@@ -10,6 +10,7 @@ _COOKIE_ACCESS = "sb_access_token"
 _COOKIE_REFRESH = "sb_refresh_token"
 _COOKIE_MAX_AGE_ACCESS = 60 * 60 * 24 * 7   # 7 days
 _COOKIE_MAX_AGE_REFRESH = 60 * 60 * 24 * 30  # 30 days
+_MAX_COOKIE_RETRIES = 3  # retries to wait for async cookie component to load
 
 
 def _get_client() -> Client:
@@ -54,15 +55,21 @@ def _restore_session_from_cookies() -> None:
     ctrl = _cookies()
     access_token = ctrl.get(_COOKIE_ACCESS)
     refresh_token = ctrl.get(_COOKIE_REFRESH)
-    if not access_token or not refresh_token:
-        return
-    try:
-        res = _get_client().auth.set_session(access_token, refresh_token)
-        st.session_state.user = res.user
-        st.session_state.session = res.session
-        _save_tokens(res.session)
-    except Exception:
-        _clear_tokens()
+    if access_token and refresh_token:
+        try:
+            res = _get_client().auth.set_session(access_token, refresh_token)
+            st.session_state.user = res.user
+            st.session_state.session = res.session
+            _save_tokens(res.session)
+            st.session_state.pop("_cookie_retries", None)
+        except Exception:
+            _clear_tokens()
+    else:
+        # Cookie component loads asynchronously — rerun a few times before giving up
+        retries = st.session_state.get("_cookie_retries", 0)
+        if retries < _MAX_COOKIE_RETRIES:
+            st.session_state["_cookie_retries"] = retries + 1
+            st.rerun()
 
 
 def sign_out():
