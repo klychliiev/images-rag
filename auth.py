@@ -1,10 +1,13 @@
+import json
 import os
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
+from urllib.parse import quote, unquote
 
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import create_client, Client
-from streamlit_cookies_controller import CookieController
 
 from config import settings
 
@@ -18,8 +21,13 @@ _COOKIE_REFRESH = "sb_refresh_token"
 _COOKIE_EXPIRY  = "sb_session_expiry"   # ISO-8601 UTC — rolling window end
 _COOKIE_MAX_AGE = 60 * 60 * 24 * 7     # browser keeps cookies for 7 days
 
-# Async cookie component may need a render cycle before returning values
-_MAX_COOKIE_RETRIES = 3
+# Cookie writes run as JS in a frontend component; it needs one roundtrip to
+# mount before st.rerun() tears it down, or the write is silently lost.
+_COOKIE_FLUSH_SECONDS = 0.5
+
+# Extending the rolling window rewrites a cookie (a component render); once a
+# minute is plenty — every rerun would render one per user interaction.
+_WINDOW_EXTEND_INTERVAL_S = 60
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -34,10 +42,33 @@ def _get_client() -> Client:
     return st.session_state.supabase
 
 
-def _cookies() -> CookieController:
-    if "cookie_ctrl" not in st.session_state:
-        st.session_state.cookie_ctrl = CookieController()
-    return st.session_state.cookie_ctrl
+def _write_cookies(values: dict[str, Optional[str]], flush: bool = True) -> None:
+    """Write (str value) or delete (None) cookies on the app origin.
+
+    Rendered as an invisible component whose JS runs in the frontend — callers
+    that st.rerun() immediately afterwards need the flush pause, or the iframe
+    is torn down before the script executes and the write is silently lost.
+    """
+    parts = []
+    for name, value in values.items():
+        if value is None:
+            cookie = f"{name}=; Max-Age=0; Path=/; SameSite=Lax"
+        else:
+            cookie = f"{name}={quote(value, safe='')}; Max-Age={_COOKIE_MAX_AGE}; Path=/; SameSite=Lax"
+        parts.append(f"window.parent.document.cookie = {json.dumps(cookie)};")
+    components.html(f"<script>{''.join(parts)}</script>", height=0)
+    if flush:
+        time.sleep(_COOKIE_FLUSH_SECONDS)
+
+
+def _read_cookie(name: str) -> Optional[str]:
+    # st.context.cookies comes straight from the request headers — synchronous,
+    # present on the very first run after a page load, no component roundtrip.
+    # The component may have percent-encoded the value when writing it.
+    val = st.context.cookies.get(name)
+    if not isinstance(val, str) or not val:
+        return None
+    return unquote(val)
 
 
 def _is_allowed_email(email: str) -> bool:
@@ -51,16 +82,25 @@ def _new_expiry() -> str:
 
 def _save_tokens(session) -> None:
     """Persist tokens and extend the rolling session window."""
-    ctrl = _cookies()
-    ctrl.set(_COOKIE_ACCESS,  session.access_token,  max_age=_COOKIE_MAX_AGE)
-    ctrl.set(_COOKIE_REFRESH, session.refresh_token, max_age=_COOKIE_MAX_AGE)
-    ctrl.set(_COOKIE_EXPIRY,  _new_expiry(),         max_age=_COOKIE_MAX_AGE)
+    _write_cookies({
+        _COOKIE_ACCESS:  session.access_token,
+        _COOKIE_REFRESH: session.refresh_token,
+        _COOKIE_EXPIRY:  _new_expiry(),
+    })
 
 
 def _clear_tokens() -> None:
-    ctrl = _cookies()
-    for key in (_COOKIE_ACCESS, _COOKIE_REFRESH, _COOKIE_EXPIRY):
-        ctrl.remove(key)
+    _write_cookies({_COOKIE_ACCESS: None, _COOKIE_REFRESH: None, _COOKIE_EXPIRY: None})
+
+
+def _extend_window() -> None:
+    """Push the rolling-window cookie forward, at most once a minute."""
+    now = time.monotonic()
+    if now - st.session_state.get("_window_extended_at", 0.0) < _WINDOW_EXTEND_INTERVAL_S:
+        return
+    st.session_state["_window_extended_at"] = now
+    # No rerun follows a window extension — the iframe mounts on its own time.
+    _write_cookies({_COOKIE_EXPIRY: _new_expiry()}, flush=False)
 
 
 def _restore_session_from_cookies() -> None:
@@ -73,43 +113,39 @@ def _restore_session_from_cookies() -> None:
     """
     if st.session_state.get("user"):
         # Already authenticated — extend rolling window and return
-        _cookies().set(_COOKIE_EXPIRY, _new_expiry(), max_age=_COOKIE_MAX_AGE)
+        _extend_window()
         return
 
-    ctrl = _cookies()
-    access_token  = ctrl.get(_COOKIE_ACCESS)
-    refresh_token = ctrl.get(_COOKIE_REFRESH)
-    expiry_str    = ctrl.get(_COOKIE_EXPIRY)
+    access_token  = _read_cookie(_COOKIE_ACCESS)
+    refresh_token = _read_cookie(_COOKIE_REFRESH)
+    expiry_str    = _read_cookie(_COOKIE_EXPIRY)
 
-    if access_token and refresh_token:
-        # ── Enforce session window ────────────────────────────────────────────
-        if expiry_str:
-            try:
-                expiry = datetime.fromisoformat(expiry_str)
-                if datetime.now(timezone.utc) > expiry:
-                    _clear_tokens()
-                    st.session_state["_session_expired"] = True
-                    return
-            except ValueError:
-                pass  # malformed timestamp — let Supabase decide validity
+    if not (access_token and refresh_token):
+        return  # genuinely signed out — no cookies in the request
 
-        # ── Restore via Supabase (auto-refreshes access token if needed) ──────
+    # ── Enforce session window ────────────────────────────────────────────────
+    if expiry_str:
         try:
-            res = _get_client().auth.set_session(access_token, refresh_token)
-            st.session_state.user    = res.user
-            st.session_state.session = res.session
-            _save_tokens(res.session)   # persist refreshed token + extend window
-            st.session_state.pop("_cookie_retries",  None)
-            st.session_state.pop("_session_expired", None)
-        except Exception:
-            _clear_tokens()
+            expiry = datetime.fromisoformat(expiry_str)
+            if datetime.now(timezone.utc) > expiry:
+                _clear_tokens()
+                st.session_state["_session_expired"] = True
+                return
+        except ValueError:
+            pass  # malformed timestamp — let Supabase decide validity
 
-    else:
-        # Cookie component loads async — retry before showing login form
-        retries = st.session_state.get("_cookie_retries", 0)
-        if retries < _MAX_COOKIE_RETRIES:
-            st.session_state["_cookie_retries"] = retries + 1
-            st.rerun()
+    # ── Restore via Supabase (auto-refreshes access token if needed) ──────────
+    try:
+        res = _get_client().auth.set_session(access_token, refresh_token)
+        st.session_state.user    = res.user
+        st.session_state.session = res.session
+        st.session_state.pop("_session_expired", None)
+        if res.session.refresh_token != refresh_token:
+            _save_tokens(res.session)   # token rotated — persist the new pair
+        else:
+            _extend_window()
+    except Exception:
+        _clear_tokens()
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -126,8 +162,7 @@ def sign_in(email: str, password: str) -> Tuple[Optional[dict], Optional[str]]:
         st.session_state.user    = res.user
         st.session_state.session = res.session
         _save_tokens(res.session)
-        for k in ("_session_expired", "_cookie_retries"):
-            st.session_state.pop(k, None)
+        st.session_state.pop("_session_expired", None)
         return res.user, None
     except Exception as e:
         return None, str(e)
@@ -149,7 +184,7 @@ def sign_out() -> None:
     except Exception:
         pass
     _clear_tokens()
-    for k in ("user", "session", "_session_expired", "_cookie_retries"):
+    for k in ("user", "session", "_session_expired", "_window_extended_at"):
         st.session_state.pop(k, None)
 
 

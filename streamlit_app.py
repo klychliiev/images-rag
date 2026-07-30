@@ -12,6 +12,7 @@ from processor import process_any, MarkdownProcessor
 from drive_uploader import (
     upload_images_to_folder, upload_guide_images,
     list_guides, delete_guide_folder,
+    list_loose_files, delete_file,
     get_thumbnail_bytes,
 )
 from pinecone_service import PineconeDocumentIndexer
@@ -362,29 +363,8 @@ with tab2:
             files = guide.get("files", [])
 
             with st.expander(f"📚 {gname}  —  {len(files)} image(s)  —  last modified {modified}"):
-                if files:
-                    cols = st.columns(min(len(files), 4))
-                    for i, f in enumerate(files):
-                        thumb = f.get("thumbnailLink")
-                        with cols[i % 4]:
-                            if thumb:
-                                thumb_bytes = get_thumbnail_bytes(thumb)
-                                if thumb_bytes:
-                                    st.image(thumb_bytes, width=120, caption=f["name"])
-                                    if st.button("🔍", key=f"view_{f['id']}", help="View full size"):
-                                        st.session_state["_preview_file"] = {
-                                            "id": f["id"],
-                                            "name": f["name"],
-                                            "thumbnail": thumb,
-                                        }
-                                        _image_preview_dialog()
-                            else:
-                                st.caption(f["name"])
-                else:
-                    st.write("*(no images)*")
-
-                st.divider()
-
+                # Delete controls render before the thumbnail grid so a failed
+                # thumbnail can never take the button down with it.
                 confirm_key = f"confirm_delete_guide_{gid}"
                 if st.session_state.get(confirm_key):
                     st.warning(
@@ -413,3 +393,96 @@ with tab2:
                     if st.button("🗑️ Delete guide", key=f"delete_guide_{gid}"):
                         st.session_state[confirm_key] = True
                         st.rerun()
+
+                st.divider()
+
+
+                if files:
+                    cols = st.columns(min(len(files), 4))
+                    for i, f in enumerate(files):
+                        thumb = f.get("thumbnailLink")
+                        with cols[i % 4]:
+                            try:
+                                thumb_bytes = get_thumbnail_bytes(thumb) if thumb else None
+                                if thumb_bytes:
+                                    st.image(thumb_bytes, width=120, caption=f["name"])
+                                    if st.button("🔍", key=f"view_{f['id']}", help="View full size"):
+                                        st.session_state["_preview_file"] = {
+                                            "id": f["id"],
+                                            "name": f["name"],
+                                            "thumbnail": thumb,
+                                        }
+                                        _image_preview_dialog()
+                                else:
+                                    st.caption(f["name"])
+                            except Exception:
+                                st.caption(f"⚠️ {f['name']} (preview unavailable)")
+                else:
+                    st.write("*(no images)*")
+
+    st.divider()
+    st.subheader("🧹 Loose files")
+    st.caption(
+        "Files sitting directly in the Drive folder (uploaded by the old pipeline). "
+        "They are not part of any guide but still count against Drive storage."
+    )
+
+    if st.button("🔄 Refresh loose files", key="refresh_loose"):
+        st.session_state.pop("loose_files", None)
+
+    if "loose_files" not in st.session_state:
+        with st.spinner("Scanning for loose files..."):
+            try:
+                st.session_state["loose_files"] = list_loose_files(drive_folder)
+            except Exception as e:
+                st.error(f"❌ Could not scan loose files: {e}")
+                st.session_state["loose_files"] = []
+
+    loose = st.session_state.get("loose_files", [])
+
+    if not loose:
+        st.info("No loose files — everything in the folder belongs to a guide.")
+    else:
+        st.write(f"**{len(loose)} loose file(s)** in `{drive_folder}`")
+
+        if st.session_state.get("confirm_delete_loose_all"):
+            st.warning(
+                f"Delete **all {len(loose)} loose files** from Drive? This cannot be undone."
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Yes, delete all", key="yes_loose_all", type="primary"):
+                    with st.spinner("Deleting loose files..."):
+                        failed = 0
+                        for f in loose:
+                            try:
+                                delete_file(f["id"])
+                            except Exception:
+                                failed += 1
+                        st.session_state["confirm_delete_loose_all"] = False
+                        st.session_state.pop("loose_files", None)
+                        if failed:
+                            st.error(f"❌ {failed} file(s) could not be deleted.")
+                        else:
+                            st.rerun()
+            with c2:
+                if st.button("Cancel", key="cancel_loose_all"):
+                    st.session_state["confirm_delete_loose_all"] = False
+                    st.rerun()
+        else:
+            if st.button("🗑️ Delete all loose files", key="delete_loose_all"):
+                st.session_state["confirm_delete_loose_all"] = True
+                st.rerun()
+
+        for f in loose:
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                st.write(f"📄 {f['name']}  —  modified {f.get('modifiedTime', '')[:10]}")
+            with c2:
+                if st.button("🗑️", key=f"del_loose_{f['id']}", help="Delete this file"):
+                    try:
+                        delete_file(f["id"])
+                        st.session_state.pop("loose_files", None)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Delete failed: {e}")

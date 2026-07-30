@@ -334,6 +334,24 @@ def list_guides(parent_folder_name: str) -> list[dict]:
     return guides
 
 
+def list_loose_files(parent_folder_name: str) -> list[dict]:
+    """List non-folder files sitting directly in the parent folder.
+
+    These are legacy flat uploads from the pre-ZIP pipeline: invisible in the
+    guide list (which only shows subfolders) but still counting against Drive
+    storage.
+    """
+    service = get_service()
+    parent_id = ensure_folder(service, parent_folder_name)
+    results = service.files().list(
+        q=f"'{parent_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
+        fields="files(id,name,mimeType,modifiedTime)",
+        orderBy="name",
+        pageSize=1000,
+    ).execute()
+    return results.get("files", [])
+
+
 def delete_guide_folder(folder_id: str) -> None:
     """Permanently delete a guide folder and all its contents."""
     service = get_service()
