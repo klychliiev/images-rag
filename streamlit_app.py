@@ -17,7 +17,7 @@ from drive_uploader import (
 )
 from pinecone_service import PineconeDocumentIndexer
 
-from auth import auth_sidebar, _get_client
+from auth import auth_sidebar, _get_client, _read_cookie, _write_cookies
 
 st.set_page_config(
     page_title="Document Processor",
@@ -235,6 +235,13 @@ def process_one(upload, indexer: PineconeDocumentIndexer):
 
 if not is_authed:
     st.warning("You must sign in with your **@artisio.co** account to process files.")
+    # Temporary session diagnostics — open the app with ?diag=1 to view.
+    if st.query_params.get("diag"):
+        with st.expander("🔧 Session diagnostics", expanded=True):
+            st.write(f"streamlit version: `{st.__version__}`")
+            st.write(f"cookies the server sees: `{sorted(st.context.cookies.keys())}`")
+            st.write(f"probe readback: `{_read_cookie('sb_probe')!r}`")
+            _write_cookies({"sb_probe": "cloud-write-ok"})
     st.stop()
 
 
