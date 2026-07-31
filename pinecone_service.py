@@ -1,13 +1,33 @@
 import hashlib
+import re
 import time
 from typing import Any
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from langchain_openai.embeddings import OpenAIEmbeddings
 from loguru import logger
 from pinecone import Pinecone, ServerlessSpec
 
 from config import settings
+
+# Split on markdown headers first so each section (with its image) stays in one chunk.
+# Then only size-split sections that are genuinely too long.
+_HEADERS_TO_SPLIT = [("#", "h1"), ("##", "h2"), ("###", "h3")]
+_md_splitter = MarkdownHeaderTextSplitter(
+    headers_to_split_on=_HEADERS_TO_SPLIT,
+    strip_headers=False,
+)
+_size_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=700,
+    chunk_overlap=80,
+    length_function=len,
+    separators=["\n\n", "\n"],
+)
+
+
+def _source_prefix(filename: str) -> str:
+    """Stable Pinecone-safe ID prefix derived from the source filename."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", filename)[:40]
 
 
 class PineconeDocumentIndexer:
@@ -25,16 +45,7 @@ class PineconeDocumentIndexer:
             openai_api_key=openai_api_key, model="text-embedding-3-small"
         )
 
-        self.chunk_size = 2000
-        self.chunk_overlap = 300
         self.batch_size = 200
-
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            length_function=len,
-            separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""],
-        )
 
     def _list_index_names(self) -> list[str]:
         idxs = self.pc.list_indexes()
@@ -89,9 +100,25 @@ class PineconeDocumentIndexer:
             )
 
     def chunk_document(self, content: str) -> list[str]:
-        chunks = self.text_splitter.split_text(content or "")
+        # Split by markdown headers first so each procedure + its image stays together.
+        # Fall back to pure size-splitting if the document has no headers.
+        header_docs = _md_splitter.split_text(content or "")
+        chunks: list[str] = []
+        for doc in header_docs:
+            text = doc.page_content
+            if not text.strip():
+                continue
+            if len(text) <= 700:
+                chunks.append(text)
+            else:
+                chunks.extend(_size_splitter.split_text(text))
+
+        if not chunks:
+            chunks = _size_splitter.split_text(content or "")
+
         if not chunks:
             return []
+
         logger.info(f"Document split into {len(chunks)} chunks")
         lens = [len(c) for c in chunks]
         logger.info(
@@ -115,9 +142,11 @@ class PineconeDocumentIndexer:
     ) -> list[dict[str, Any]]:
         vectors = []
         base_metadata = metadata or {}
+        filename = base_metadata.get("filename", "doc")
+        prefix = _source_prefix(filename)
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
             chunk_hash = hashlib.md5(chunk.encode()).hexdigest()[:8]
-            vid = f"chunk_{i}_{chunk_hash}"
+            vid = f"{prefix}_{i}_{chunk_hash}"
             vectors.append(
                 {
                     "id": vid,
@@ -150,10 +179,38 @@ class PineconeDocumentIndexer:
                 logger.error(f"Error upserting batch {i//self.batch_size + 1}: {e}")
                 raise
 
+    def delete_guide_vectors(self, guide_name: str) -> None:
+        """Delete all Pinecone vectors for a guide using metadata filter."""
+        self.ensure_index()
+        try:
+            self.index.delete(filter={"guide_name": {"$eq": guide_name}})
+            logger.info(f"Deleted Pinecone vectors for guide '{guide_name}'")
+        except Exception as e:
+            logger.warning(f"Could not delete vectors for guide '{guide_name}': {e}")
+
+    def delete_document_vectors(self, filename: str) -> int:
+        """Delete all previously indexed vectors for a given file (by ID prefix)."""
+        self.ensure_index()
+        prefix = _source_prefix(filename)
+        deleted = 0
+        try:
+            for id_page in self.index.list(prefix=prefix):
+                if id_page:
+                    self.index.delete(ids=id_page)
+                    deleted += len(id_page)
+            if deleted:
+                logger.info(f"Deleted {deleted} stale vectors for '{filename}'")
+        except Exception as e:
+            logger.warning(f"Could not delete stale vectors for '{filename}': {e}")
+        return deleted
+
     def process_and_index(
         self, content: str, metadata: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         self.ensure_index()
+        filename = (metadata or {}).get("filename", "")
+        if filename:
+            self.delete_document_vectors(filename)
         chunks = self.chunk_document(content or "")
         embeddings = self.create_embeddings(chunks)
         vectors = self.prepare_vectors(chunks, embeddings, metadata)

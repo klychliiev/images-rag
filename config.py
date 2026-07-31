@@ -18,6 +18,23 @@ class Settings(BaseSettings):
     aws_account_id: str
     registry_name: str
     tag: str
+    
+    google_token_json: dict 
+    google_client_id: str
+    google_client_secret: str
+    google_redirect_uris: str
+    google_auth_uri: str
+    google_token_uri: str
+    
+    supabase_url: str
+    supabase_anon_key: str
+    
+    acceptable_email_domain: str
+
+    # Rolling inactivity window for the Streamlit session (minutes).
+    # Overridable via SESSION_TIMEOUT_MINUTES env var or .env.
+    session_timeout_minutes: int = 60
+    
 
 
 settings = Settings()
