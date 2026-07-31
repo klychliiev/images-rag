@@ -238,9 +238,11 @@ if not is_authed:
     # Temporary session diagnostics — open the app with ?diag=1 to view.
     if st.query_params.get("diag"):
         with st.expander("🔧 Session diagnostics", expanded=True):
+            jar = st.session_state.get("_cookie_jar_cache", {})
             st.write(f"streamlit version: `{st.__version__}`")
-            st.write(f"cookies the server sees: `{sorted(st.context.cookies.keys())}`")
-            st.write(f"probe readback: `{_read_cookie('sb_probe')!r}`")
+            st.write(f"header cookies (st.context): `{sorted(st.context.cookies.keys())}`")
+            st.write(f"frontend jar cookies: `{sorted(jar.keys())}`")
+            st.write(f"probe readback: `{_read_cookie('sb_probe', jar)!r}`")
             _write_cookies({"sb_probe": "cloud-write-ok"})
     st.stop()
 

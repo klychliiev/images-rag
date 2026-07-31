@@ -6,6 +6,7 @@ from urllib.parse import quote, unquote
 
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_cookies_controller import CookieController
 from supabase import create_client, Client
 
 from config import settings
@@ -55,13 +56,36 @@ def _write_cookies(values: dict[str, Optional[str]]) -> None:
     components.html(f"<script>{''.join(parts)}</script>", height=0)
 
 
-def _read_cookie(name: str) -> Optional[str]:
-    # st.context.cookies comes straight from the request headers — synchronous,
-    # present on the very first run after a page load, no component roundtrip.
-    # The component may have percent-encoded the value when writing it.
+def _component_cookies() -> dict:
+    """Browser cookies read in the frontend and delivered as a component value.
+
+    Streamlit Cloud's proxy strips Cookie headers before they reach the app,
+    so st.context.cookies is always empty there — a frontend read is the only
+    one that works. The value needs one roundtrip: the first run returns {}
+    and Streamlit auto-reruns when the real dict arrives.
+
+    Must be called AT MOST ONCE per script run (the library writes to a
+    widget-backed session_state key on repeat calls, which raises) — the
+    result is cached in session_state for any later reader in the same run.
+    """
+    try:
+        cookies = CookieController(key="_cookie_reader").getAll()
+        jar = cookies if isinstance(cookies, dict) else {}
+    except Exception:
+        jar = {}
+    st.session_state["_cookie_jar_cache"] = jar
+    return jar
+
+
+def _read_cookie(name: str, jar: Optional[dict] = None) -> Optional[str]:
+    # Request headers first: synchronous and authoritative where the platform
+    # passes them through (e.g. local runs). Falls back to the frontend jar.
     val = st.context.cookies.get(name)
+    if not (isinstance(val, str) and val) and jar is not None:
+        val = jar.get(name)
     if not isinstance(val, str) or not val:
         return None
+    # Our writer percent-encodes values; unquote is a no-op if already plain.
     return unquote(val)
 
 
@@ -133,9 +157,10 @@ def _restore_session_from_cookies() -> None:
     if st.session_state.get("_cookies_cleared"):
         return  # signed out / cleared this session — headers are stale until reload
 
-    access_token  = _read_cookie(_COOKIE_ACCESS)
-    refresh_token = _read_cookie(_COOKIE_REFRESH)
-    expiry_str    = _read_cookie(_COOKIE_EXPIRY)
+    jar = _component_cookies()
+    access_token  = _read_cookie(_COOKIE_ACCESS, jar)
+    refresh_token = _read_cookie(_COOKIE_REFRESH, jar)
+    expiry_str    = _read_cookie(_COOKIE_EXPIRY, jar)
 
     if not (access_token and refresh_token):
         return  # genuinely signed out — no cookies in the request
