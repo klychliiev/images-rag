@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     supabase_anon_key: str
     
     acceptable_email_domain: str
+
+    # Rolling inactivity window for the Streamlit session (minutes).
+    # Overridable via SESSION_TIMEOUT_MINUTES env var or .env.
+    session_timeout_minutes: int = 60
     
 
 

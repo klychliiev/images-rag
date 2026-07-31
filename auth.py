@@ -1,5 +1,4 @@
 import json
-import os
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
@@ -12,18 +11,13 @@ from supabase import create_client, Client
 from config import settings
 
 # ── Session config ────────────────────────────────────────────────────────────
-# Change SESSION_TIMEOUT_MINUTES env var (or edit the default) to adjust.
-SESSION_TIMEOUT_MINUTES: int = int(os.getenv("SESSION_TIMEOUT_MINUTES", "30"))
+SESSION_TIMEOUT_MINUTES: int = settings.session_timeout_minutes
 
 # ── Cookie keys ───────────────────────────────────────────────────────────────
 _COOKIE_ACCESS  = "sb_access_token"
 _COOKIE_REFRESH = "sb_refresh_token"
 _COOKIE_EXPIRY  = "sb_session_expiry"   # ISO-8601 UTC — rolling window end
 _COOKIE_MAX_AGE = 60 * 60 * 24 * 7     # browser keeps cookies for 7 days
-
-# Cookie writes run as JS in a frontend component; it needs one roundtrip to
-# mount before st.rerun() tears it down, or the write is silently lost.
-_COOKIE_FLUSH_SECONDS = 0.5
 
 # Extending the rolling window rewrites a cookie (a component render); once a
 # minute is plenty — every rerun would render one per user interaction.
@@ -42,12 +36,14 @@ def _get_client() -> Client:
     return st.session_state.supabase
 
 
-def _write_cookies(values: dict[str, Optional[str]], flush: bool = True) -> None:
+def _write_cookies(values: dict[str, Optional[str]]) -> None:
     """Write (str value) or delete (None) cookies on the app origin.
 
-    Rendered as an invisible component whose JS runs in the frontend — callers
-    that st.rerun() immediately afterwards need the flush pause, or the iframe
-    is torn down before the script executes and the write is silently lost.
+    Rendered as an invisible component whose JS runs in the frontend. The run
+    that renders it MUST complete normally: st.rerun() in the same run tears
+    the iframe down before its JS executes and the write is silently lost
+    (verified empirically — a flush sleep does NOT prevent it). Callers that
+    need to rerun set a _pending_cookie_* flag and let the next run write.
     """
     parts = []
     for name, value in values.items():
@@ -57,8 +53,6 @@ def _write_cookies(values: dict[str, Optional[str]], flush: bool = True) -> None
             cookie = f"{name}={quote(value, safe='')}; Max-Age={_COOKIE_MAX_AGE}; Path=/; SameSite=Lax"
         parts.append(f"window.parent.document.cookie = {json.dumps(cookie)};")
     components.html(f"<script>{''.join(parts)}</script>", height=0)
-    if flush:
-        time.sleep(_COOKIE_FLUSH_SECONDS)
 
 
 def _read_cookie(name: str) -> Optional[str]:
@@ -87,10 +81,15 @@ def _save_tokens(session) -> None:
         _COOKIE_REFRESH: session.refresh_token,
         _COOKIE_EXPIRY:  _new_expiry(),
     })
+    # The save included a fresh expiry — no need for another extension write.
+    st.session_state["_window_extended_at"] = time.monotonic()
 
 
 def _clear_tokens() -> None:
     _write_cookies({_COOKIE_ACCESS: None, _COOKIE_REFRESH: None, _COOKIE_EXPIRY: None})
+    # st.context.cookies keeps showing the deleted cookies until the next page
+    # load — this flag stops the restore path from resurrecting the session.
+    st.session_state["_cookies_cleared"] = True
 
 
 def _extend_window() -> None:
@@ -99,8 +98,21 @@ def _extend_window() -> None:
     if now - st.session_state.get("_window_extended_at", 0.0) < _WINDOW_EXTEND_INTERVAL_S:
         return
     st.session_state["_window_extended_at"] = now
-    # No rerun follows a window extension — the iframe mounts on its own time.
-    _write_cookies({_COOKIE_EXPIRY: _new_expiry()}, flush=False)
+    _write_cookies({_COOKIE_EXPIRY: _new_expiry()})
+
+
+def _flush_pending_cookie_ops() -> None:
+    """Perform cookie writes deferred by sign_in/sign_out.
+
+    Those handlers st.rerun() to refresh the UI, and a write rendered in the
+    same run as a rerun is lost — so they queue the operation and this runs it
+    at the top of the next (normal, run-to-completion) render.
+    """
+    pending_session = st.session_state.pop("_pending_cookie_save", None)
+    if pending_session is not None:
+        _save_tokens(pending_session)
+    if st.session_state.pop("_pending_cookie_clear", False):
+        _clear_tokens()
 
 
 def _restore_session_from_cookies() -> None:
@@ -111,10 +123,15 @@ def _restore_session_from_cookies() -> None:
     Uses the refresh-token flow automatically when the access token is short-lived.
     Sets st.session_state['_session_expired'] = True when the window closes.
     """
+    _flush_pending_cookie_ops()
+
     if st.session_state.get("user"):
         # Already authenticated — extend rolling window and return
         _extend_window()
         return
+
+    if st.session_state.get("_cookies_cleared"):
+        return  # signed out / cleared this session — headers are stale until reload
 
     access_token  = _read_cookie(_COOKIE_ACCESS)
     refresh_token = _read_cookie(_COOKIE_REFRESH)
@@ -161,8 +178,11 @@ def sign_in(email: str, password: str) -> Tuple[Optional[dict], Optional[str]]:
         res = _get_client().auth.sign_in_with_password({"email": email, "password": password})
         st.session_state.user    = res.user
         st.session_state.session = res.session
-        _save_tokens(res.session)
+        # Deferred: the UI reruns right after sign-in, which would kill a cookie
+        # write rendered now. The next run persists the tokens.
+        st.session_state["_pending_cookie_save"] = res.session
         st.session_state.pop("_session_expired", None)
+        st.session_state.pop("_cookies_cleared", None)
         return res.user, None
     except Exception as e:
         return None, str(e)
@@ -183,8 +203,9 @@ def sign_out() -> None:
         _get_client().auth.sign_out()
     except Exception:
         pass
-    _clear_tokens()
-    for k in ("user", "session", "_session_expired", "_window_extended_at"):
+    # Deferred for the same rerun reason as sign_in.
+    st.session_state["_pending_cookie_clear"] = True
+    for k in ("user", "session", "_session_expired", "_window_extended_at", "_pending_cookie_save"):
         st.session_state.pop(k, None)
 
 
