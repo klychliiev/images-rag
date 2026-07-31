@@ -68,6 +68,9 @@ def _component_cookies() -> dict:
     widget-backed session_state key on repeat calls, which raises) — the
     result is cached in session_state for any later reader in the same run.
     """
+    # Before the first render there may be a delivery still in flight — lets
+    # the UI say "checking session…" instead of flashing the login form.
+    st.session_state["_jar_pending"] = "_cookie_reader" not in st.session_state
     try:
         cookies = CookieController(key="_cookie_reader").getAll()
         jar = cookies if isinstance(cookies, dict) else {}
@@ -75,6 +78,11 @@ def _component_cookies() -> dict:
         jar = {}
     st.session_state["_cookie_jar_cache"] = jar
     return jar
+
+
+def session_restore_pending() -> bool:
+    """True while the frontend cookie read may still be in flight."""
+    return bool(st.session_state.get("_jar_pending"))
 
 
 def _read_cookie(name: str, jar: Optional[dict] = None) -> Optional[str]:
